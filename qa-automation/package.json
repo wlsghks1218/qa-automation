@@ -1,0 +1,30 @@
+{
+  "name": "test",
+  "version": "1.0.0",
+  "description": "",
+  "main": "runner.js",
+  "bin": "runner.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node runner.js",
+    "test": "npx playwright test --project=logged-out",
+    "test:login": "npx playwright test --project=logged-in",
+    "test:all": "npx playwright test",
+    "codegen:auth": "npx playwright codegen https://unifi-web.line-apps-beta.com/ --save-storage=playwright/.auth/user.json",
+   "build:exe": "pkg . --targets node18-win-x64 --output Unifi_QA_Runner.exe",
+    "build:mac": "pkg . --targets node18-macos-x64,node18-macos-arm64 --output Unifi_QA_Runner_Mac",
+    "build:all": "npm run build:exe && npm run build:mac"
+  },
+  "pkg": {
+    "assets": [
+      "tests/**/*",
+      "playwright/.auth/**/*"
+    ]
+  },
+  "keywords": [],
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^26.6.3",
+    "@yao-pkg/pkg": "^5.16.1"
+  }
+}
