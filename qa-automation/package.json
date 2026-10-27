@@ -1,30 +1,97 @@
 {
-  "name": "test",
+  "name": "qa-automation-kc",
   "version": "1.0.0",
-  "description": "",
-  "main": "runner.js",
-  "bin": "runner.js",
+  "description": "URL/기획서 기반 TC 자동 생성 및 테스트 실행 프로그램",
+  "main": "app/main.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node runner.js",
-    "test": "npx playwright test --project=logged-out",
-    "test:login": "npx playwright test --project=logged-in",
-    "test:all": "npx playwright test",
-    "codegen:auth": "npx playwright codegen https://unifi-web.line-apps-beta.com/ --save-storage=playwright/.auth/user.json",
-   "build:exe": "pkg . --targets node18-win-x64 --output Unifi_QA_Runner.exe",
-    "build:mac": "pkg . --targets node18-macos-x64,node18-macos-arm64 --output Unifi_QA_Runner_Mac",
-    "build:all": "npm run build:exe && npm run build:mac"
+    "test": "npx playwright test --project=\"Desktop Chrome\"",
+    "test:runner": "node runner.js",
+    "report": "npx playwright show-report",
+    "generate": "node scripts/generate-specs.js",
+    "test:generated": "npx playwright test --config app/playwright.generated.config.js",
+    "app": "electron .",
+    "app:browser": "node app/server.js",
+    "version:bump": "node scripts/bump-version.js",
+    "build:win": "node scripts/build-app.js win",
+    "build:mac": "node scripts/build-app.js mac",
+    "build": "node scripts/build-app.js"
   },
   "pkg": {
     "assets": [
       "tests/**/*",
-      "playwright/.auth/**/*"
+      "playwright/.auth/**/*",
+      "scripts/**/*"
     ]
   },
   "keywords": [],
   "devDependencies": {
-    "@playwright/test": "^1.63.0",
     "@types/node": "^26.6.3",
-    "@yao-pkg/pkg": "^5.16.1"
+    "@yao-pkg/pkg": "^5.16.1",
+    "electron": "^38.8.6",
+    "electron-builder": "^26.18.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.3.0",
+    "@google/genai": "^2.31.0",
+    "@playwright/test": "^1.63.0",
+    "dotenv": "^18.0.9",
+    "openai": "^7.45.0"
+  },
+  "productName": "QA_Automation_KC",
+  "author": "KC",
+  "build": {
+    "appId": "com.kc.qa-automation",
+    "productName": "QA_Automation_KC",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "asar": false,
+    "files": [
+      "package.json",
+      "app/**/*",
+      "!app/.profile/**",
+      "scripts/**/*",
+      "tests/support/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "build/pw-browsers",
+        "to": "pw-browsers"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "app/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "QA_Automation_KC",
+      "artifactName": "${productName}_v${env.QA_DISPLAY_VERSION}_Setup.${ext}"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "category": "public.app-category.developer-tools",
+      "identity": null,
+      "artifactName": "${productName}_v${env.QA_DISPLAY_VERSION}_${arch}.${ext}"
+    }
+  },
+  "allowScripts": {
+    "electron@38.8.6": true,
+    "electron-winstaller@5.4.0": true
   }
 }

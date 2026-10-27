@@ -6,3 +6,13 @@ node_modules/
 /blob-report/
 /playwright/.cache/
 /playwright/.auth/
+
+# 로컬 비밀값 / 프로그램 실행 결과
+.env
+/results/
+/app/.profile/
+/app/settings.json
+/dist/
+/build/pw-browsers/
+/settings.json
+/tests/generated/

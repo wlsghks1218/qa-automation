@@ -1,0 +1,40 @@
+# QA_Automation_KC 설치 파일 빌드 (Windows .exe + macOS .dmg)
+# GitHub → Actions → "Build QA_Automation_KC" → Run workflow 로 수동 실행하거나,
+# qa-kc-v* 태그(예: qa-kc-v0.002)를 push 하면 자동 실행됩니다.
+name: Build QA_Automation_KC
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['qa-kc-v*']
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: win
+          - os: macos-latest # Apple Silicon
+            target: mac
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: qa-automation
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: qa-automation/package-lock.json
+      - run: npm ci
+      - run: node scripts/build-app.js ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QA_Automation_KC-${{ matrix.target }}
+          path: |
+            qa-automation/dist/*.exe
+            qa-automation/dist/*.dmg
+          retention-days: 30

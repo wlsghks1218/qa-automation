@@ -1,0 +1,48 @@
+// 설치 파일 빌드
+//   node scripts/build-app.js win   → dist/QA_Automation_KC_v0.001_Setup.exe
+//   node scripts/build-app.js mac   → dist/QA_Automation_KC_v0.001_arm64.dmg  (macOS 에서만 가능)
+const { execFileSync } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const { buildIcons } = require('./build-icons');
+
+const ROOT = path.join(__dirname, '..');
+const target = process.argv[2] || (process.platform === 'darwin' ? 'mac' : 'win');
+if (!['win', 'mac'].includes(target)) {
+  console.error('사용법: node scripts/build-app.js [win|mac]');
+  process.exit(1);
+}
+if (target === 'mac' && process.platform !== 'darwin') {
+  console.error('macOS 설치 파일은 macOS 에서만 빌드할 수 있습니다. (맥북에서 실행하거나 GitHub Actions "Build App" 사용)');
+  process.exit(1);
+}
+
+// 앱 버전 0.001 → 설치 파일용 semver 0.0.1 (1.002 → 1.0.2)
+const { version } = require('../app/version.json');
+const n = Number(version);
+const semver = `${Math.floor(n)}.0.${Math.round((n % 1) * 1000)}`;
+
+const run = (args, env = {}) =>
+  execFileSync(process.execPath, args, { cwd: ROOT, stdio: 'inherit', env: { ...process.env, ...env } });
+
+(async () => {
+  console.log(`[1/3] 아이콘 생성`);
+  await buildIcons();
+
+  // 앱에 포함할 테스트용 브라우저: Chrome(Chromium) · Safari(WebKit) · Firefox (대상 PC에 따로 설치할 필요 없음)
+  console.log(`\n[2/3] 테스트 브라우저 준비 (build/pw-browsers)`);
+  const browsersDir = path.join(ROOT, 'build', 'pw-browsers');
+  const cli = path.join(path.dirname(require.resolve('@playwright/test/package.json')), 'cli.js');
+  run([cli, 'install', 'chromium', 'webkit', 'firefox'], { PLAYWRIGHT_BROWSERS_PATH: browsersDir });
+  // 실행 잠금 파일 등은 포함하지 않는다
+  for (const f of fs.readdirSync(browsersDir)) if (f.startsWith('.')) fs.rmSync(path.join(browsersDir, f), { recursive: true, force: true });
+
+  console.log(`\n[3/3] 설치 파일 빌드: QA_Automation_KC v${version} (${target})`);
+  const builder = path.join(path.dirname(require.resolve('electron-builder/package.json')), 'cli.js');
+  run([builder, `--${target}`, '--publish', 'never', `-c.extraMetadata.version=${semver}`], { QA_DISPLAY_VERSION: version });
+
+  console.log(`\n빌드 완료 → dist/`);
+  fs.readdirSync(path.join(ROOT, 'dist'))
+    .filter((f) => f.includes(`v${version}`) && /\.(exe|dmg)$/.test(f))
+    .forEach((f) => console.log(`  ${f}`));
+})();

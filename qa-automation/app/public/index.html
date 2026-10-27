@@ -1,0 +1,787 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QA_Automation_KC</title>
+<link rel="icon" href="/static/icon.png">
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --surface: #ffffff;
+    --surface-2: #f8f9fb;
+    --border: #e3e6eb;
+    --text: #16181d;
+    --muted: #6b7280;
+    --accent: #3b5bdb;
+    --accent-weak: #edf1ff;
+    --pass: #2f9e44;
+    --pass-weak: #ebfbee;
+    --fail: #e03131;
+    --fail-weak: #fff0f0;
+    --warn: #e8590c;
+    --warn-weak: #fff4e6;
+    --skip: #868e96;
+    --console: #14161b;
+    --console-text: #c9d1d9;
+    --radius: 12px;
+    --shadow: 0 1px 2px rgba(16, 24, 40, .04), 0 1px 3px rgba(16, 24, 40, .06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --surface: #171a20;
+      --surface-2: #1d2027;
+      --border: #2a2e37;
+      --text: #e8eaef;
+      --muted: #9aa1ad;
+      --accent: #7b93ff;
+      --accent-weak: #1e2540;
+      --pass: #51cf66;
+      --pass-weak: #14271a;
+      --fail: #ff6b6b;
+      --fail-weak: #2d1717;
+      --warn: #ff922b;
+      --warn-weak: #2d2014;
+      --skip: #868e96;
+      --console: #0b0d10;
+      --shadow: none;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.55 "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", system-ui, sans-serif;
+  }
+  button, input { font: inherit; color: inherit; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 24px 20px 48px; }
+
+  header.top { display: flex; align-items: center; gap: 12px; margin-bottom: 28px; }
+  .mark {
+    width: 32px; height: 32px; border-radius: 9px; background: var(--accent);
+    display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 13px; letter-spacing: -.02em;
+  }
+  .brand { font-weight: 650; font-size: 16px; letter-spacing: -.01em; }
+  .ver { font-size: 12px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; }
+  .spacer { flex: 1; }
+  .icon-btn {
+    border: 1px solid var(--border); background: var(--surface); border-radius: 8px;
+    padding: 6px 12px; cursor: pointer; font-size: 13px; color: var(--muted);
+  }
+  .icon-btn:hover { color: var(--text); }
+
+  h1 { font-size: 22px; letter-spacing: -.02em; margin: 0 0 6px; }
+  .lead { color: var(--muted); margin: 0 0 20px; }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 20px; }
+  .card + .card { margin-top: 16px; }
+  .label { font-size: 13px; font-weight: 600; margin: 0 0 8px; display: block; }
+  .field + .field { margin-top: 18px; }
+
+  .url-input {
+    width: 100%; padding: 11px 14px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--surface-2); outline: none;
+  }
+  .url-input:focus { border-color: var(--accent); background: var(--surface); }
+
+  .drop {
+    border: 1.5px dashed var(--border); border-radius: 10px; padding: 22px; text-align: center;
+    background: var(--surface-2); cursor: pointer; transition: border-color .15s, background .15s;
+  }
+  .drop:hover, .drop.over { border-color: var(--accent); background: var(--accent-weak); }
+  .drop strong { display: block; margin-bottom: 2px; }
+  .drop small { color: var(--muted); }
+  .file-chip {
+    display: none; align-items: center; gap: 10px; padding: 10px 14px; border: 1px solid var(--border);
+    border-radius: 10px; background: var(--surface-2);
+  }
+  .file-chip.show { display: flex; }
+  .file-chip .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file-chip .size { color: var(--muted); font-size: 12px; }
+  .file-chip button { border: 0; background: none; cursor: pointer; color: var(--muted); font-size: 13px; }
+
+  .scope { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .scope label {
+    border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; cursor: pointer;
+    display: flex; gap: 10px; align-items: flex-start; background: var(--surface-2);
+  }
+  .scope label:has(input:checked) { border-color: var(--accent); background: var(--accent-weak); }
+  .scope label:has(input:disabled) { opacity: .5; cursor: not-allowed; }
+  .scope input { margin-top: 3px; accent-color: var(--accent); }
+  .scope b { display: block; font-weight: 600; }
+  .scope span { color: var(--muted); font-size: 12.5px; }
+
+  .notice { margin-top: 14px; padding: 10px 14px; border-radius: 10px; font-size: 13px; display: none; }
+  .notice.show { display: block; }
+  .notice.warn { background: var(--warn-weak); color: var(--warn); }
+  .notice.error { background: var(--fail-weak); color: var(--fail); }
+  .notice input { margin-top: 8px; width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); }
+
+  .actions { display: flex; align-items: center; gap: 12px; margin-top: 20px; }
+  .primary {
+    background: var(--accent); color: #fff; border: 0; border-radius: 10px; padding: 11px 22px;
+    font-weight: 600; cursor: pointer;
+  }
+  .primary:disabled { opacity: .45; cursor: not-allowed; }
+  .ghost { background: none; border: 1px solid var(--border); border-radius: 10px; padding: 10px 16px; cursor: pointer; text-decoration: none; color: var(--text); display: inline-block; }
+  .ghost:hover { border-color: var(--accent); }
+  .hint { color: var(--muted); font-size: 12.5px; }
+
+  .progress { display: none; }
+  .progress.show { display: block; }
+  .phase { display: flex; align-items: center; gap: 10px; font-weight: 600; }
+  .spinner { width: 16px; height: 16px; border: 2px solid var(--accent-weak); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .elapsed { color: var(--muted); font-weight: 400; font-size: 13px; }
+  details.log { margin-top: 12px; }
+  details.log summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  .console {
+    margin-top: 8px; background: var(--console); color: var(--console-text); border-radius: 10px;
+    padding: 12px 14px; height: 260px; overflow: auto; font: 12px/1.6 Consolas, "D2Coding", monospace; white-space: pre-wrap;
+  }
+
+  .results { display: none; }
+  .results.show { display: block; }
+  .section-title { display: flex; align-items: baseline; gap: 10px; margin: 0 0 14px; }
+  .section-title h2 { font-size: 16px; margin: 0; }
+  .section-title .meta { color: var(--muted); font-size: 12.5px; }
+  .section-title .grow { flex: 1; }
+
+  .tiles { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 18px; }
+  .tile { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; background: var(--surface-2); }
+  .tile .k { font-size: 12px; color: var(--muted); }
+  .tile .v { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .tile.pass .v { color: var(--pass); }
+  .tile.fail .v { color: var(--fail); }
+  .tile.flaky .v { color: var(--warn); }
+  .rate-bar { height: 6px; border-radius: 99px; background: var(--border); overflow: hidden; display: flex; margin-bottom: 18px; }
+  .rate-bar i { display: block; height: 100%; }
+
+  .group { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 8px; overflow: hidden; }
+  .group > summary {
+    list-style: none; display: flex; align-items: center; gap: 10px; padding: 11px 14px; cursor: pointer; background: var(--surface-2);
+  }
+  .group > summary::-webkit-details-marker { display: none; }
+  .group > summary .t { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pill { font-size: 12px; border-radius: 999px; padding: 1px 9px; font-variant-numeric: tabular-nums; }
+  .pill.pass { background: var(--pass-weak); color: var(--pass); }
+  .pill.fail { background: var(--fail-weak); color: var(--fail); }
+  .test { display: flex; gap: 10px; padding: 9px 14px; border-top: 1px solid var(--border); align-items: flex-start; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 7px; flex: none; }
+  .dot.passed { background: var(--pass); }
+  .dot.failed { background: var(--fail); }
+  .dot.flaky { background: var(--warn); }
+  .dot.skipped { background: var(--skip); }
+  .test .body { flex: 1; min-width: 0; }
+  .test .dur { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .test pre {
+    margin: 6px 0 0; padding: 8px 10px; border-radius: 8px; background: var(--fail-weak); color: var(--fail);
+    font: 12px/1.5 Consolas, monospace; white-space: pre-wrap; word-break: break-all;
+  }
+
+  table.tc { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.tc th, table.tc td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  table.tc th { font-size: 12px; color: var(--muted); font-weight: 600; background: var(--surface-2); position: sticky; top: 0; }
+  table.tc ol { margin: 0; padding-left: 18px; }
+  .tc-wrap { max-height: 520px; overflow: auto; border: 1px solid var(--border); border-radius: 10px; }
+  .prio { font-size: 11.5px; font-weight: 600; }
+  .prio.High { color: var(--fail); }
+  .prio.Medium { color: var(--warn); }
+  .prio.Low { color: var(--muted); }
+  ul.questions { margin: 12px 0 0; padding-left: 20px; color: var(--muted); }
+
+  .empty { color: var(--muted); text-align: center; padding: 18px; }
+
+  dialog#aiDialog {
+    border: 1px solid var(--border); border-radius: 14px; padding: 0; width: min(520px, calc(100vw - 32px));
+    background: var(--surface); color: var(--text); box-shadow: 0 20px 60px rgba(0, 0, 0, .25);
+  }
+  dialog#aiDialog::backdrop { background: rgba(10, 12, 16, .45); }
+  .ai-form { padding: 22px; display: flex; flex-direction: column; }
+  .ai-form h2 { margin: 0 0 4px; font-size: 17px; }
+  .ai-form .hint { margin: 0; }
+  .ai-form a.hint { margin-top: 6px; color: var(--accent); text-decoration: none; font-size: 12.5px; }
+  .provider-list { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 16px; }
+  .provider-list label {
+    border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; cursor: pointer; background: var(--surface-2);
+    display: flex; flex-direction: column; gap: 2px; font-size: 13px;
+  }
+  .provider-list label:has(input:checked) { border-color: var(--accent); background: var(--accent-weak); }
+  .provider-list input { display: none; }
+  .provider-list b { font-weight: 600; }
+  .provider-list .k { font-size: 11.5px; color: var(--muted); }
+  .provider-list .k.ok { color: var(--pass); }
+  @media (max-width: 520px) { .provider-list { grid-template-columns: 1fr; } }
+
+  .browsers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .browsers label {
+    border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; cursor: pointer; background: var(--surface-2);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .browsers label:has(input:checked) { border-color: var(--accent); background: var(--accent-weak); }
+  .browsers input { accent-color: var(--accent); }
+  .browsers b { font-weight: 600; }
+  .browsers span { color: var(--muted); font-size: 12px; }
+
+  .run-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 20px; }
+  .run-btn {
+    text-align: left; border: 0; border-radius: 12px; padding: 14px 16px; cursor: pointer;
+    background: var(--accent); color: #fff; display: flex; flex-direction: column; gap: 4px;
+  }
+  .run-btn.ai { background: var(--text); color: var(--surface); }
+  .run-btn b { font-size: 15px; }
+  .run-btn span { font-size: 12.5px; opacity: .85; line-height: 1.45; }
+  .run-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+  .bdots { display: inline-flex; gap: 4px; margin-left: 8px; vertical-align: middle; }
+  .bdot { font-size: 11px; border-radius: 5px; padding: 0 6px; border: 1px solid var(--border); color: var(--muted); }
+  .bdot.passed { color: var(--pass); border-color: var(--pass); }
+  .bdot.failed, .bdot.flaky { color: var(--fail); border-color: var(--fail); }
+  .diff-list { margin: 0 0 16px; padding: 12px 14px; border-radius: 10px; background: var(--warn-weak); color: var(--warn); font-size: 13px; }
+  .diff-list ul { margin: 6px 0 0; padding-left: 18px; }
+  .finding { display: flex; gap: 10px; padding: 9px 0; border-top: 1px solid var(--border); font-size: 13px; }
+  .finding:first-child { border-top: 0; }
+  .finding .cat { flex: none; width: 64px; color: var(--muted); }
+  @media (max-width: 720px) { .browsers, .run-buttons { grid-template-columns: 1fr; } }
+
+  .dir-row { display: flex; gap: 8px; align-items: center; }
+  .dir-path {
+    flex: 1; min-width: 0; padding: 9px 14px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface-2);
+    font: 12.5px/1.5 Consolas, "D2Coding", monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left;
+  }
+  .ghost.small { padding: 8px 12px; font-size: 13px; white-space: nowrap; }
+
+  .badge { display: inline-block; font-size: 11.5px; font-weight: 600; border-radius: 6px; padding: 1px 7px; white-space: nowrap; }
+  .badge.passed { background: var(--pass-weak); color: var(--pass); }
+  .badge.failed, .badge.flaky { background: var(--fail-weak); color: var(--fail); }
+  .badge.not_found { background: var(--warn-weak); color: var(--warn); }
+  .badge.manual, .badge.none, .badge.skipped { background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); }
+  .cell-note { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .cell-note.conflict { color: var(--warn); }
+  td pre.err {
+    margin: 6px 0 0; padding: 6px 8px; border-radius: 6px; background: var(--fail-weak); color: var(--fail);
+    font: 11.5px/1.45 Consolas, monospace; white-space: pre-wrap; word-break: break-all; max-height: 120px; overflow: auto;
+  }
+  .tile.warn .v { color: var(--warn); }
+  .tiles.six { grid-template-columns: repeat(6, 1fr); }
+  @media (max-width: 720px) { .tiles.six { grid-template-columns: repeat(2, 1fr); } }
+
+  @media (max-width: 720px) {
+    .scope { grid-template-columns: 1fr; }
+    .tiles { grid-template-columns: repeat(2, 1fr); }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="mark">QA</div>
+    <div class="brand">QA_Automation_KC</div>
+    <div class="ver" id="ver">v—</div>
+    <div class="spacer"></div>
+    <button class="icon-btn" id="settingsBtn" type="button">AI 설정 · <span id="llmLabel">—</span></button>
+  </header>
+
+  <h1>URL 또는 기획서를 첨부해주세요</h1>
+  <p class="lead">사이트를 분석해 기능별 테스트 케이스를 자동으로 만들고, 바로 실행해서 결과를 보여드립니다.</p>
+
+  <section class="card" id="form">
+    <div class="field">
+      <label class="label" for="url">URL</label>
+      <input class="url-input" id="url" type="url" placeholder="https://example.com" autocomplete="off" spellcheck="false">
+    </div>
+
+    <div class="field">
+      <span class="label">기획서 첨부</span>
+      <div class="drop" id="drop" tabindex="0">
+        <strong>파일을 여기로 드래그하거나 클릭해서 선택</strong>
+        <small>PDF, PNG, JPG, WEBP, TXT, MD · 최대 40MB</small>
+      </div>
+      <div class="file-chip" id="fileChip">
+        <span>📄</span>
+        <span class="name" id="fileName"></span>
+        <span class="size" id="fileSize"></span>
+        <button type="button" id="fileRemove">삭제</button>
+      </div>
+      <input type="file" id="fileInput" accept=".pdf,.png,.jpg,.jpeg,.webp,.txt,.md" hidden>
+    </div>
+
+    <div class="field">
+      <span class="label">테스트 범위</span>
+      <div class="scope">
+        <label>
+          <input type="radio" name="scope" value="all" checked>
+          <div><b>입력한 사이트에 연결된 세부 사이트 모두</b><span>같은 도메인으로 연결된 페이지를 모두 찾아 분석·테스트합니다.</span></div>
+        </label>
+        <label>
+          <input type="radio" name="scope" value="single">
+          <div><b>입력한(첨부한) 사이트(PDF)만</b><span>입력한 URL 한 페이지 또는 첨부한 기획서 범위만 테스트합니다.</span></div>
+        </label>
+      </div>
+    </div>
+
+    <div class="field">
+      <span class="label">테스트 브라우저 <span class="hint">· 여러 개 선택하면 브라우저마다 실행하고 차이를 따로 보여드립니다</span></span>
+      <div class="browsers">
+        <label><input type="checkbox" name="browser" value="chromium" checked><b>Chrome</b><span>Chromium</span></label>
+        <label><input type="checkbox" name="browser" value="webkit"><b>Safari</b><span>WebKit 엔진</span></label>
+        <label><input type="checkbox" name="browser" value="firefox"><b>Firefox</b><span>Gecko 엔진</span></label>
+      </div>
+    </div>
+
+    <div class="field">
+      <span class="label">결과 저장 폴더</span>
+      <div class="dir-row">
+        <div class="dir-path" id="resultsDir" title="">—</div>
+        <button class="ghost small" type="button" id="pickDir">폴더 선택</button>
+        <button class="ghost small" type="button" id="openDir">폴더 열기</button>
+      </div>
+    </div>
+
+    <div class="notice warn" id="keyNotice">
+      기획서 분석에는 <b id="keyNoticeProvider">AI</b> API Key가 필요합니다. 다른 AI를 쓰려면 상단 'AI 설정'에서 바꿀 수 있습니다.
+      <input type="password" id="keyInline" placeholder="API Key 입력 후 Enter (이 PC에만 저장됩니다)">
+    </div>
+    <div class="notice error" id="formError"></div>
+
+    <div class="run-buttons">
+      <button class="run-btn" id="runBasic" type="button" disabled>
+        <b>규칙 기반 테스트</b>
+        <span>브라우저가 화면 요소를 직접 눌러보고 관찰한 동작으로 TC 생성 · AI 사용 안 함</span>
+      </button>
+      <button class="run-btn ai" id="runAi" type="button" disabled>
+        <b>AI 테스트</b>
+        <span>규칙 기반 분석 + AI가 화면을 보고 기대 동작 기준 TC 작성, 문구·이미지·레이아웃 이슈 보고</span>
+      </button>
+    </div>
+    <p class="hint" id="runHint" style="margin:10px 0 0">URL을 입력하거나 기획서를 첨부해주세요.</p>
+  </section>
+
+  <section class="card progress" id="progress">
+    <div class="phase"><div class="spinner"></div><span id="phaseText">준비 중</span><span class="elapsed" id="elapsed"></span></div>
+    <details class="log" open>
+      <summary>실행 로그</summary>
+      <div class="console" id="console"></div>
+    </details>
+  </section>
+
+  <section class="results" id="results"></section>
+</div>
+
+<dialog id="aiDialog">
+  <form method="dialog" class="ai-form">
+    <h2>AI 설정</h2>
+    <p class="hint">기획서 분석과 TC 매핑에 사용할 AI를 선택하세요. API Key는 이 PC에만 저장됩니다.</p>
+    <div class="provider-list" id="providerList"></div>
+    <label class="label" for="aiKey" style="margin-top:16px">API Key <span class="hint" id="aiKeyState"></span></label>
+    <input class="url-input" id="aiKey" type="password" autocomplete="off" spellcheck="false">
+    <a class="hint" id="aiKeyLink" href="#" target="_blank">API Key 발급 페이지 열기</a>
+    <label class="label" for="aiModel" style="margin-top:16px">모델</label>
+    <input class="url-input" id="aiModel" type="text" autocomplete="off" spellcheck="false">
+    <div class="actions" style="justify-content:flex-end">
+      <button class="ghost" value="cancel" type="submit">취소</button>
+      <button class="primary" id="aiSave" value="save" type="submit">저장</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const MAX_SIZE = 40 * 1024 * 1024;
+
+  let selectedFile = null;
+  let hasApiKey = false;
+  let running = false;
+  let startedAt = 0;
+  let timer = null;
+
+  // ── 입력 상태 ─────────────────────────────────────────
+  function refreshForm() {
+    const url = $('url').value.trim();
+    const allRadio = document.querySelector('input[name=scope][value=all]');
+    // 세부 사이트 탐색은 URL이 있어야 가능
+    allRadio.disabled = !url && !!selectedFile;
+    if (allRadio.disabled && allRadio.checked) document.querySelector('input[name=scope][value=single]').checked = true;
+
+    const noBrowser = !document.querySelector('input[name=browser]:checked');
+    $('keyNotice').classList.toggle('show', !!selectedFile && !hasApiKey);
+    $('runBasic').disabled = running || noBrowser || (!url && !selectedFile);
+    // AI 테스트는 화면을 봐야 하므로 URL 이 필요
+    $('runAi').disabled = running || noBrowser || !url;
+
+    const scope = document.querySelector('input[name=scope]:checked').value;
+    let hint = 'URL을 입력하거나 기획서를 첨부해주세요.';
+    if (noBrowser) hint = '테스트 브라우저를 하나 이상 선택해주세요.';
+    else if (url && selectedFile && scope === 'single') hint = '기획서 TC를 실제 화면에 매핑해 기획서 기준 테스트만 실행합니다.';
+    else if (url && selectedFile) hint = '기획서 기준 테스트와 사이트 전체 기능 테스트를 함께 실행합니다.';
+    else if (url) hint = '규칙 기반: 무료 · AI 테스트: 선택한 AI의 API 사용량이 발생합니다.';
+    else if (selectedFile) hint = '기획서로 TC를 작성합니다. 실행까지 하려면 URL도 입력해주세요. (AI 테스트는 URL 필요)';
+    if (!running && !hasApiKey && url) hint += ` · AI 테스트에는 ${llm ? llm.providers.find((p) => p.id === llm.provider).label : 'AI'} API Key가 필요합니다.`;
+    $('runHint').textContent = running ? '실행 중입니다…' : hint;
+  }
+
+  function setFile(file) {
+    $('formError').classList.remove('show');
+    if (file && file.size > MAX_SIZE) return showError('파일이 너무 큽니다 (최대 40MB).');
+    selectedFile = file || null;
+    $('fileChip').classList.toggle('show', !!file);
+    $('drop').style.display = file ? 'none' : '';
+    if (file) {
+      $('fileName').textContent = file.name;
+      $('fileSize').textContent = file.size > 1024 * 1024 ? `${(file.size / 1024 / 1024).toFixed(1)}MB` : `${Math.ceil(file.size / 1024)}KB`;
+    }
+    $('fileInput').value = '';
+    refreshForm();
+  }
+
+  function showError(msg) {
+    $('formError').textContent = msg;
+    $('formError').classList.add('show');
+  }
+
+  $('url').addEventListener('input', refreshForm);
+  $('url').addEventListener('keydown', (e) => e.key === 'Enter' && !$('runBasic').disabled && start('basic'));
+  $('drop').addEventListener('click', () => $('fileInput').click());
+  $('drop').addEventListener('keydown', (e) => (e.key === 'Enter' || e.key === ' ') && $('fileInput').click());
+  $('fileInput').addEventListener('change', (e) => setFile(e.target.files[0]));
+  $('fileRemove').addEventListener('click', () => setFile(null));
+  document.querySelectorAll('input[name=scope]').forEach((r) => r.addEventListener('change', refreshForm));
+
+  // 창 어디에 떨어뜨려도 첨부되도록 문서 전체에서 드래그 처리
+  ['dragenter', 'dragover'].forEach((ev) =>
+    document.addEventListener(ev, (e) => { e.preventDefault(); $('drop').classList.add('over'); })
+  );
+  ['dragleave', 'drop'].forEach((ev) =>
+    document.addEventListener(ev, (e) => { e.preventDefault(); if (ev === 'drop' || !e.relatedTarget) $('drop').classList.remove('over'); })
+  );
+  document.addEventListener('drop', (e) => { if (!running && e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]); });
+
+  // ── AI 설정 (공급자 / API Key / 모델) ─────────────────
+  let llm = null;
+
+  function applyLlm(next) {
+    llm = next;
+    const current = llm.providers.find((p) => p.id === llm.provider);
+    hasApiKey = current.hasKey;
+    $('llmLabel').textContent = current.label.split(' ')[0];
+    $('keyNoticeProvider').textContent = current.label;
+    refreshForm();
+  }
+
+  async function saveLlm(body) {
+    const res = await fetch('/api/settings', { method: 'POST', body: JSON.stringify(body) }).then((r) => r.json());
+    applyLlm(res.llm);
+  }
+
+  $('keyInline').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && e.target.value.trim()) {
+      saveLlm({ provider: llm.provider, apiKey: e.target.value.trim() });
+      e.target.value = '';
+    }
+  });
+
+  function selectProvider(id) {
+    const p = llm.providers.find((x) => x.id === id);
+    $('aiKey').value = '';
+    $('aiKey').placeholder = p.hasKey ? '저장된 키 사용 중 · 바꾸려면 새 키 입력' : `${p.label} API Key 입력`;
+    $('aiKeyState').textContent = p.hasKey ? '· 저장됨' : '· 미입력';
+    $('aiKeyLink').href = p.keyUrl;
+    $('aiModel').value = p.model;
+    $('aiModel').placeholder = `기본값: ${p.defaultModel}`;
+  }
+
+  $('settingsBtn').addEventListener('click', () => {
+    $('providerList').innerHTML = llm.providers
+      .map((p) => `
+        <label>
+          <input type="radio" name="provider" value="${p.id}" ${p.id === llm.provider ? 'checked' : ''}>
+          <b>${esc(p.label.split(' ')[0])}</b>
+          <span class="hint">${esc(p.label.split(' ').slice(1).join(' '))}</span>
+          <span class="k ${p.hasKey ? 'ok' : ''}">${p.hasKey ? '키 저장됨' : '키 없음'}</span>
+        </label>`)
+      .join('');
+    document.querySelectorAll('input[name=provider]').forEach((r) => r.addEventListener('change', () => selectProvider(r.value)));
+    selectProvider(llm.provider);
+    $('aiDialog').showModal();
+  });
+
+  $('aiDialog').addEventListener('close', () => {
+    if ($('aiDialog').returnValue !== 'save') return;
+    const provider = document.querySelector('input[name=provider]:checked').value;
+    saveLlm({ provider, apiKey: $('aiKey').value.trim(), model: $('aiModel').value.trim() });
+  });
+
+  // ── 결과 저장 폴더 ────────────────────────────────────
+  function showResultsDir(dir) {
+    $('resultsDir').textContent = dir;
+    $('resultsDir').title = dir;
+  }
+  $('pickDir').addEventListener('click', async () => {
+    $('pickDir').disabled = true;
+    const res = await fetch('/api/results-dir', { method: 'POST', body: JSON.stringify({ pick: true }) }).then((r) => r.json());
+    $('pickDir').disabled = running;
+    if (res.error) return showError(res.error);
+    showResultsDir(res.resultsDir);
+  });
+  $('openDir').addEventListener('click', () => fetch('/api/open-folder', { method: 'POST', body: '{}' }));
+
+  // ── 실행 ──────────────────────────────────────────────
+  function readFile(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result.split(',')[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function mimeOf(file) {
+    if (file.type) return file.type;
+    if (/\.md$/i.test(file.name)) return 'text/markdown';
+    if (/\.txt$/i.test(file.name)) return 'text/plain';
+    return '';
+  }
+
+  async function start(mode) {
+    $('formError').classList.remove('show');
+    const url = $('url').value.trim();
+    const scope = document.querySelector('input[name=scope]:checked').value;
+    const browsers = [...document.querySelectorAll('input[name=browser]:checked')].map((el) => el.value);
+    let file = null;
+    if (selectedFile) {
+      file = { name: selectedFile.name, type: mimeOf(selectedFile), data: await readFile(selectedFile) };
+    }
+    const res = await fetch('/api/run', { method: 'POST', body: JSON.stringify({ url, scope, mode, browsers, file }) });
+    if (!res.ok) return showError((await res.json()).error || '실행할 수 없습니다.');
+  }
+  $('runBasic').addEventListener('click', () => start('basic'));
+  $('runAi').addEventListener('click', () => start('ai'));
+  document.querySelectorAll('input[name=browser]').forEach((el) => el.addEventListener('change', refreshForm));
+
+  function setRunning(on, phase) {
+    running = on;
+    $('progress').classList.toggle('show', on);
+    $('form').querySelectorAll('input, button').forEach((el) => { if (el.id !== 'openDir') el.disabled = on; });
+    if (on) {
+      $('phaseText').textContent = phase || '준비 중';
+      clearInterval(timer);
+      timer = setInterval(() => {
+        const s = Math.floor((Date.now() - startedAt) / 1000);
+        $('elapsed').textContent = `${Math.floor(s / 60)}분 ${s % 60}초 경과`;
+      }, 1000);
+    } else {
+      clearInterval(timer);
+    }
+    refreshForm();
+  }
+
+  function appendLog(line) {
+    const c = $('console');
+    const stick = c.scrollTop + c.clientHeight >= c.scrollHeight - 20;
+    c.textContent += line + '\n';
+    if (stick) c.scrollTop = c.scrollHeight;
+  }
+
+  // ── 결과 렌더링 ───────────────────────────────────────
+  function renderTests(t, reportUrl) {
+    const pct = (n) => (t.total ? (n / t.total) * 100 : 0);
+    const multi = (t.browsers || []).length > 1;
+    const SEV = ['passed', 'skipped', 'flaky', 'failed'];
+    const groups = t.groups
+      .map((g) => {
+        const failed = g.tests.filter((x) => x.status === 'failed').length;
+        const passed = g.tests.filter((x) => x.status === 'passed').length;
+        // 같은 TC 의 브라우저별 실행을 한 줄로 묶는다
+        const byTitle = new Map();
+        g.tests.forEach((x) => byTitle.set(x.title, [...(byTitle.get(x.title) || []), x]));
+        const rows = [...byTitle.entries()]
+          .map(([title, runs]) => {
+            const worst = runs.reduce((a, b) => (SEV.indexOf(b.status) > SEV.indexOf(a.status) ? b : a));
+            const dots = multi ? `<span class="bdots">${runs.map((r) => `<span class="bdot ${r.status}">${esc(r.browser)}</span>`).join('')}</span>` : '';
+            const errors = runs.filter((r) => r.error).map((r) => `<pre>${multi ? `[${esc(r.browser)}] ` : ''}${esc(r.error)}</pre>`).join('');
+            return `
+            <div class="test">
+              <span class="dot ${worst.status}"></span>
+              <div class="body">${esc(title)}${dots}${errors}</div>
+              <span class="dur">${(Math.max(...runs.map((r) => r.duration)) / 1000).toFixed(1)}s</span>
+            </div>`;
+          })
+          .join('');
+        return `
+          <details class="group" ${failed ? 'open' : ''}>
+            <summary>
+              <span class="t">${esc(g.title)}</span>
+              <span class="pill pass">통과 ${passed}</span>
+              ${failed ? `<span class="pill fail">실패 ${failed}</span>` : ''}
+            </summary>
+            ${rows}
+          </details>`;
+      })
+      .join('');
+
+    return `
+      <section class="card">
+        <div class="section-title">
+          <h2>사이트 테스트 결과</h2><span class="meta">${t.groups.length}개 그룹 · ${t.total}개 테스트</span>
+          <span class="grow"></span>
+          ${reportUrl ? `<a class="ghost" href="${reportUrl}" target="_blank">상세 리포트 열기</a>` : ''}
+        </div>
+        <div class="tiles">
+          <div class="tile"><div class="k">전체</div><div class="v">${t.total}</div></div>
+          <div class="tile pass"><div class="k">통과</div><div class="v">${t.passed}</div></div>
+          <div class="tile fail"><div class="k">실패</div><div class="v">${t.failed}</div></div>
+          <div class="tile flaky"><div class="k">불안정</div><div class="v">${t.flaky}</div></div>
+          <div class="tile"><div class="k">건너뜀</div><div class="v">${t.skipped}</div></div>
+        </div>
+        <div class="rate-bar">
+          <i style="width:${pct(t.passed)}%;background:var(--pass)"></i>
+          <i style="width:${pct(t.flaky)}%;background:var(--warn)"></i>
+          <i style="width:${pct(t.failed)}%;background:var(--fail)"></i>
+        </div>
+        ${multi ? `<div class="hint" style="margin:-8px 0 14px">${t.browsers.map((b) => `${esc(b.name)}: 통과 ${b.passed} / 실패 ${b.failed}${b.flaky ? ` / 불안정 ${b.flaky}` : ''}`).join(' · ')}</div>` : ''}
+        ${(t.browserDiffs || []).length ? `
+          <div class="diff-list"><b>브라우저에 따라 결과가 다른 TC ${t.browserDiffs.length}건</b> (호환성 문제 후보)
+            <ul>${t.browserDiffs.map((d) => `<li>${esc(d.title)} - ${esc(d.failedIn.join(', '))}에서 실패, ${esc(d.passedIn.join(', '))}에서 통과</li>`).join('')}</ul>
+          </div>` : ''}
+        ${groups || '<div class="empty">실행된 테스트가 없습니다.</div>'}
+      </section>`;
+  }
+
+  const RESULT_LABEL = { passed: '통과', failed: '실패', flaky: '불안정', skipped: '건너뜀', not_found: '화면에서 못 찾음', manual: '수동 확인 필요', none: '미실행' };
+
+  function tcResultCell(tc) {
+    const m = tc.mapping;
+    const ex = tc.execution;
+    const key = ex ? ex.status : m ? m.status === 'automated' ? 'none' : m.status : 'none';
+    const notes = [];
+    if (m && m.status !== 'automated' && m.reason) notes.push(`<div class="cell-note">${esc(m.reason)}</div>`);
+    if (m && m.conflict) notes.push(`<div class="cell-note conflict">⚠ 실제 동작 차이: ${esc(m.conflict)}</div>`);
+    if (ex && ex.error) notes.push(`<pre class="err">${esc(ex.error)}</pre>`);
+    const per = ex && ex.byBrowser && Object.keys(ex.byBrowser).length > 1
+      ? `<span class="bdots">${Object.entries(ex.byBrowser).map(([b, st]) => `<span class="bdot ${st}">${esc(b)}</span>`).join('')}</span>`
+      : '';
+    return `<span class="badge ${key}">${RESULT_LABEL[key]}</span>${per}${notes.join('')}`;
+  }
+
+  function renderCoverage(c) {
+    if (!c) return '';
+    return `
+      <div class="tiles six">
+        <div class="tile"><div class="k">기획서 TC</div><div class="v">${c.total}</div></div>
+        <div class="tile"><div class="k">자동 실행</div><div class="v">${c.automated}</div></div>
+        <div class="tile pass"><div class="k">통과</div><div class="v">${c.passed}</div></div>
+        <div class="tile fail"><div class="k">실패</div><div class="v">${c.failed}</div></div>
+        <div class="tile warn"><div class="k">화면에서 못 찾음</div><div class="v">${c.notFound}</div></div>
+        <div class="tile"><div class="k">수동 확인</div><div class="v">${c.manual}</div></div>
+      </div>
+      ${c.conflicts ? `<div class="notice warn show" style="margin:-6px 0 16px">기획서와 실제 동작이 다른 것으로 보이는 TC가 ${c.conflicts}건 있습니다. 결과 열의 ⚠ 표시를 확인하세요.</div>` : ''}`;
+  }
+
+  function renderDoc(doc, csvUrl, heading = '기획서 기반 TC', extra = '') {
+    const executed = doc.testCases.some((tc) => tc.mapping);
+    const rows = doc.testCases
+      .map((tc) => `
+        <tr>
+          <td>${esc(tc.id)}</td>
+          <td>${esc(tc.feature)}</td>
+          <td><b>${esc(tc.title)}</b>${tc.precondition ? `<div class="hint">사전조건: ${esc(tc.precondition)}</div>` : ''}</td>
+          <td><ol>${tc.steps.map((s) => `<li>${esc(s)}</li>`).join('')}</ol></td>
+          <td>${esc(tc.expected)}</td>
+          <td>${esc(tc.type)}<br><span class="prio ${esc(tc.priority)}">${esc(tc.priority)}</span></td>
+          ${executed ? `<td style="min-width:170px">${tcResultCell(tc)}</td>` : ''}
+          <td class="hint">${esc(tc.source)}</td>
+        </tr>`)
+      .join('');
+    const questions = doc.openQuestions.length
+      ? `<div class="label" style="margin-top:18px">기획 확인 필요 사항</div><ul class="questions">${doc.openQuestions.map((q) => `<li>${esc(q)}</li>`).join('')}</ul>`
+      : '';
+    return `
+      <section class="card">
+        <div class="section-title">
+          <h2>${heading}</h2><span class="meta">${esc(doc.documentTitle)} · TC ${doc.testCases.length}건</span>
+          <span class="grow"></span>
+          ${csvUrl ? `<a class="ghost" href="${csvUrl}">CSV 다운로드</a>` : ''}
+        </div>
+        ${extra}
+        ${executed ? renderCoverage(doc.coverage) : '<div class="notice warn show" style="margin:0 0 14px">URL을 함께 입력하면 이 TC들을 실제 화면에서 실행합니다.</div>'}
+        <div class="tc-wrap">
+          <table class="tc">
+            <thead><tr><th>ID</th><th>기능</th><th>제목</th><th>절차</th><th>기대 결과</th><th>유형</th>${executed ? '<th>실행 결과</th>' : ''}<th>근거</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+        ${questions}
+      </section>`;
+  }
+
+  const SEVERITY_ORDER = { High: 0, Medium: 1, Low: 2 };
+
+  function renderFindings(findings) {
+    if (!findings || !findings.length) return '<div class="hint" style="margin:0 0 14px">AI가 화면에서 발견한 이슈가 없습니다.</div>';
+    const rows = [...findings]
+      .sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity])
+      .map((f) => `
+        <div class="finding">
+          <span class="cat">${esc(f.category)}<br><span class="prio ${esc(f.severity)}">${esc(f.severity)}</span></span>
+          <div>${esc(f.description)}<div class="cell-note">${esc(f.page)}${f.location ? ` · ${esc(f.location)}` : ''}</div></div>
+        </div>`)
+      .join('');
+    return `<div class="label">AI가 화면에서 발견한 이슈 ${findings.length}건</div><div style="margin-bottom:18px">${rows}</div>`;
+  }
+
+  function renderResult(r) {
+    const el = $('results');
+    if (!r) return el.classList.remove('show');
+    const took = Math.round((r.finishedAt - r.startedAt) / 1000);
+    const target = [r.url, r.fileName].filter(Boolean).map(esc).join(' + ');
+    const errors = r.errors.map((e) => `<div class="notice error show">${esc(e)}</div>`).join('');
+    el.innerHTML = `
+      <div class="section-title" style="margin-top:28px">
+        <h2>실행 결과</h2>
+        <span class="meta">${target} · ${r.mode === 'ai' ? 'AI 테스트' : '규칙 기반 테스트'} · ${r.scope === 'all' ? '세부 사이트 모두' : '입력한 범위만'} · ${Math.floor(took / 60)}분 ${took % 60}초</span>
+        <span class="grow"></span>
+        <button class="ghost small" type="button" onclick="fetch('/api/open-folder',{method:'POST',body:JSON.stringify({id:${JSON.stringify(r.id)}})})">결과 폴더 열기</button>
+      </div>
+      ${errors}
+      ${r.tests ? renderTests(r.tests, r.reportUrl) : ''}
+      ${r.ai ? renderDoc(r.ai.doc, r.ai.csvUrl, 'AI 분석 TC', renderFindings(r.ai.findings)) : ''}
+      ${r.doc ? renderDoc(r.doc, r.docCsvUrl) : ''}`;
+    el.classList.add('show');
+  }
+
+  // ── 서버 연결 ─────────────────────────────────────────
+  async function init() {
+    const s = await fetch('/api/state').then((r) => r.json());
+    $('ver').textContent = `v${s.version}`;
+    document.title = `${s.name} v${s.version}`;
+    applyLlm(s.llm);
+    showResultsDir(s.resultsDir);
+    s.logs.forEach(appendLog);
+    if (s.running) { startedAt = Date.now(); setRunning(true, s.phase); }
+    renderResult(s.result);
+    refreshForm();
+
+    const es = new EventSource('/api/events');
+    es.addEventListener('start', () => {
+      $('console').textContent = '';
+      startedAt = Date.now();
+      renderResult(null);
+      setRunning(true);
+    });
+    es.addEventListener('phase', (e) => { const p = JSON.parse(e.data); if (p) $('phaseText').textContent = p; });
+    es.addEventListener('log', (e) => appendLog(JSON.parse(e.data)));
+    es.addEventListener('done', (e) => {
+      setRunning(false);
+      renderResult(JSON.parse(e.data));
+      $('results').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }
+
+  setInterval(() => fetch('/api/heartbeat', { method: 'POST' }).catch(() => {}), 10000);
+  init();
+</script>
+</body>
+</html>

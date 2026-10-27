@@ -1,0 +1,604 @@
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const { spawn } = require('child_process');
+
+const {
+  ENV_PATH, SETTINGS_PATH, WORKSPACE, GENERATED_DIR, DEFAULT_RESULTS_DIR,
+  GENERATOR, PLAYWRIGHT_CONFIG, PLAYWRIGHT_CLI, prepareWorkspace,
+} = require('./paths');
+require('dotenv').config({ path: ENV_PATH, quiet: true });
+
+const { generateDocTestCases, mapDocToFeatures, toCsv } = require('./doc-testcases');
+const { PROVIDERS } = require('./llm');
+const { analyzeSiteWithAi } = require('./site-ai');
+const { writeDocSpecs } = require('../scripts/lib/doc-specs');
+const { name: APP_NAME, version: VERSION } = require('./version.json');
+
+const PUBLIC_DIR = path.join(__dirname, 'public');
+const IDLE_EXIT_MS = 60 * 1000; // 개발 모드: 창을 닫고 1분간 작업이 없으면 종료
+let APP_URL = 'http://127.0.0.1';
+
+// ─────────────────────────────────────────────────────────────
+// 사용자 설정 (결과 저장 폴더 등) - settings.json
+// ─────────────────────────────────────────────────────────────
+
+const DEFAULT_SETTINGS = { resultsDir: DEFAULT_RESULTS_DIR, llmProvider: 'gemini', llmModels: {} };
+
+function loadSettings() {
+  try {
+    return { ...DEFAULT_SETTINGS, ...JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf-8')) };
+  } catch {
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+
+const settings = loadSettings();
+const runDirs = new Map(); // 실행 ID → 결과 폴더 (폴더 설정을 바꿔도 이번 세션 결과 링크 유지)
+
+function saveSettings() {
+  fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
+  fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2), 'utf-8');
+}
+
+/** 현재 선택된 AI 공급자 설정 */
+function currentLlm() {
+  const provider = PROVIDERS[settings.llmProvider] ? settings.llmProvider : 'gemini';
+  const info = PROVIDERS[provider];
+  return { provider, label: info.label, apiKey: process.env[info.envKey], model: settings.llmModels[provider] || info.defaultModel };
+}
+
+function llmSettingsView() {
+  return {
+    provider: currentLlm().provider,
+    providers: Object.entries(PROVIDERS).map(([id, p]) => ({
+      id, label: p.label, keyUrl: p.keyUrl, defaultModel: p.defaultModel,
+      model: settings.llmModels[id] || '', hasKey: !!process.env[p.envKey],
+    })),
+  };
+}
+
+function setResultsDir(dir) {
+  const resolved = path.resolve(dir);
+  fs.mkdirSync(resolved, { recursive: true });
+  fs.accessSync(resolved, fs.constants.W_OK);
+  settings.resultsDir = resolved;
+  saveSettings();
+}
+
+function resolveResultFile(relPath) {
+  const [id, ...rest] = decodeURIComponent(relPath).split('/');
+  const base = runDirs.get(id) || path.join(settings.resultsDir, id);
+  return { base, rel: rest.join('/') };
+}
+
+// OS 연동 동작. 설치된 앱(Electron)에서는 main.js 가 네이티브 대화상자로 교체한다
+const hooks = {
+  pickFolder: (initial) => (process.platform === 'darwin' ? pickFolderMac() : pickFolderWin(initial)),
+  openPath: (dir) => spawn(process.platform === 'darwin' ? 'open' : 'explorer', [dir], { detached: true, stdio: 'ignore' }).unref(),
+};
+
+function pickFolderMac() {
+  return new Promise((resolve) => {
+    const child = spawn('osascript', ['-e', 'POSIX path of (choose folder with prompt "테스트 결과를 저장할 폴더를 선택하세요")']);
+    let out = '';
+    child.stdout.on('data', (d) => (out += d.toString('utf-8')));
+    child.on('close', () => resolve(out.trim() || null));
+  });
+}
+
+/** Windows 폴더 선택 대화상자 */
+function pickFolderWin(initial) {
+  const ps = `
+    Add-Type -AssemblyName System.Windows.Forms
+    $f = New-Object System.Windows.Forms.FolderBrowserDialog
+    $f.Description = '테스트 결과를 저장할 폴더를 선택하세요'
+    $f.SelectedPath = '${initial.replace(/'/g, "''")}'
+    $f.ShowNewFolderButton = $true
+    $owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true }
+    if ($f.ShowDialog($owner) -eq 'OK') { [Console]::OutputEncoding = [Text.Encoding]::UTF8; Write-Output $f.SelectedPath }`;
+  return new Promise((resolve) => {
+    const child = spawn('powershell', ['-NoProfile', '-STA', '-Command', ps]);
+    let out = '';
+    child.stdout.on('data', (d) => (out += d.toString('utf-8')));
+    child.on('close', () => resolve(out.trim() || null));
+  });
+}
+
+const state = { running: false, phase: '', logs: [], result: null };
+const clients = new Set();
+let lastSeen = Date.now();
+
+// ─────────────────────────────────────────────────────────────
+// 실시간 로그 (SSE)
+// ─────────────────────────────────────────────────────────────
+
+function broadcast(event, data) {
+  const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  clients.forEach((res) => res.write(payload));
+}
+
+function log(line) {
+  const clean = line.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').replace(/\r/g, '');
+  if (!clean.trim()) return;
+  state.logs.push(clean);
+  if (state.logs.length > 2000) state.logs.shift();
+  broadcast('log', clean);
+}
+
+function setPhase(phase) {
+  state.phase = phase;
+  broadcast('phase', phase);
+}
+
+/**
+ * 현재 런타임(개발: node, 설치된 앱: Electron 내장 node)으로 스크립트 실행.
+ * ELECTRON_RUN_AS_NODE 는 Electron 실행 파일을 순수 node 로 동작시킨다 (일반 node 에서는 무시됨).
+ */
+function runNode(args, env = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, args, {
+      cwd: WORKSPACE,
+      env: { ...process.env, ...env, ELECTRON_RUN_AS_NODE: '1', FORCE_COLOR: '0' },
+    });
+    const pipe = (stream) => {
+      let buf = '';
+      stream.on('data', (chunk) => {
+        buf += chunk.toString('utf-8');
+        const lines = buf.split('\n');
+        buf = lines.pop();
+        lines.forEach(log);
+      });
+      stream.on('end', () => buf && log(buf));
+    };
+    pipe(child.stdout);
+    pipe(child.stderr);
+    child.on('close', (code) => resolve(code));
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
+// Playwright JSON 결과 → 화면 표시용 요약
+// ─────────────────────────────────────────────────────────────
+
+const STATUS = { expected: 'passed', unexpected: 'failed', flaky: 'flaky', skipped: 'skipped' };
+
+function summarizeReport(jsonPath) {
+  if (!fs.existsSync(jsonPath)) return null;
+  const report = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+  const groups = new Map();
+
+  const walk = (suite, parents) => {
+    const titles = suite.title ? [...parents, suite.title] : parents;
+    (suite.specs || []).forEach((spec) => {
+      spec.tests.forEach((t) => {
+        const last = t.results[t.results.length - 1] || {};
+        const group = titles.filter((s) => !s.endsWith('.ts')).join(' › ') || spec.file;
+        if (!groups.has(group)) groups.set(group, []);
+        groups.get(group).push({
+          title: spec.title,
+          browser: t.projectName,
+          status: STATUS[t.status] || t.status,
+          duration: last.duration || 0,
+          error: last.error ? (last.error.message || '').replace(/\x1b\[[0-9;]*m/g, '').split('\n').slice(0, 6).join('\n') : '',
+        });
+      });
+    });
+    (suite.suites || []).forEach((s) => walk(s, titles));
+  };
+  (report.suites || []).forEach((s) => walk(s, []));
+
+  const all = [...groups.values()].flat();
+  const count = (list, s) => list.filter((t) => t.status === s).length;
+  const browsers = [...new Set(all.map((t) => t.browser))];
+
+  // 같은 TC 가 브라우저마다 결과가 다르면 브라우저 호환성 문제 후보
+  const browserDiffs = [];
+  if (browsers.length > 1) {
+    for (const [group, tests] of groups) {
+      const byTitle = new Map();
+      tests.forEach((t) => byTitle.set(t.title, [...(byTitle.get(t.title) || []), t]));
+      for (const [title, runs] of byTitle) {
+        const ok = runs.filter((r) => r.status === 'passed').map((r) => r.browser);
+        const bad = runs.filter((r) => ['failed', 'flaky'].includes(r.status)).map((r) => r.browser);
+        if (ok.length && bad.length) browserDiffs.push({ group, title, passedIn: ok, failedIn: bad });
+      }
+    }
+  }
+
+  return {
+    total: all.length,
+    passed: count(all, 'passed'),
+    failed: count(all, 'failed'),
+    flaky: count(all, 'flaky'),
+    skipped: count(all, 'skipped'),
+    browsers: browsers.map((b) => {
+      const list = all.filter((t) => t.browser === b);
+      return { name: b, total: list.length, passed: count(list, 'passed'), failed: count(list, 'failed'), flaky: count(list, 'flaky') };
+    }),
+    browserDiffs,
+    groups: [...groups.entries()].map(([title, tests]) => ({ title, tests })),
+  };
+}
+
+// ─────────────────────────────────────────────────────────────
+// 작업 실행: (기획서 → TC) + (URL → 분석 → TC 생성 → 테스트 실행)
+// ─────────────────────────────────────────────────────────────
+
+/** 기획서/AI 분석 TC 마다 매핑 상태 + 실행 결과(브라우저별)를 붙인다 */
+const SEVERITY = ['passed', 'skipped', 'flaky', 'failed'];
+const BROWSER_LABEL = { chromium: 'Chrome', webkit: 'Safari', firefox: 'Firefox' };
+
+function attachDocResults(doc, mappings, tests, group) {
+  const runs = tests ? tests.groups.filter((g) => g.title.startsWith(`[${group}]`)).flatMap((g) => g.tests) : [];
+  doc.testCases.forEach((tc) => {
+    const m = mappings ? mappings.find((x) => x.tcId === tc.id) : null;
+    const mine = runs.filter((t) => t.title.startsWith(`${tc.id} `));
+    tc.mapping = m ? { status: m.status, reason: m.reason, conflict: m.observedConflict || '' } : null;
+    if (!mine.length) {
+      tc.execution = null;
+      return;
+    }
+    // 가장 나쁜 결과를 대표 상태로 (한 브라우저라도 실패하면 실패)
+    const worst = mine.reduce((a, b) => (SEVERITY.indexOf(b.status) > SEVERITY.indexOf(a.status) ? b : a));
+    tc.execution = {
+      status: worst.status,
+      error: worst.error,
+      byBrowser: Object.fromEntries(mine.map((r) => [r.browser, r.status])),
+    };
+  });
+
+  const count = (fn) => doc.testCases.filter(fn).length;
+  doc.coverage = {
+    total: doc.testCases.length,
+    automated: count((tc) => tc.mapping && tc.mapping.status === 'automated'),
+    passed: count((tc) => tc.execution && tc.execution.status === 'passed'),
+    failed: count((tc) => tc.execution && ['failed', 'flaky'].includes(tc.execution.status)),
+    notFound: count((tc) => tc.mapping && tc.mapping.status === 'not_found'),
+    manual: count((tc) => tc.mapping && tc.mapping.status === 'manual'),
+    conflicts: count((tc) => tc.mapping && !!tc.mapping.conflict),
+  };
+}
+
+async function runJob({ url, scope, file, mode, browsers }) {
+  const id = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const runDir = path.join(settings.resultsDir, id);
+  fs.mkdirSync(runDir, { recursive: true });
+  runDirs.set(id, runDir);
+
+  state.running = true;
+  state.logs = [];
+  state.result = null;
+  broadcast('start', { id });
+
+  const result = {
+    id, url, scope, mode, browsers, runDir,
+    fileName: file ? file.name : null,
+    startedAt: Date.now(),
+    doc: null, ai: null, tests: null, reportUrl: null, errors: [],
+  };
+  const llm = currentLlm();
+  let mappings = null;
+  let aiMappings = null;
+
+  try {
+    // 1) 기획서 → TC
+    if (file) {
+      setPhase('기획서 분석 및 TC 작성 중');
+      log(`[기획서] ${file.name} 분석 중 (${llm.label} · ${llm.model})...`);
+      try {
+        result.doc = await generateDocTestCases(file, { url, llm });
+        log(`[기획서] TC ${result.doc.testCases.length}건 작성 완료`);
+      } catch (e) {
+        result.errors.push(`기획서 분석 실패: ${e.message}`);
+        log(`[기획서] 실패: ${e.message}`);
+      }
+    }
+
+    if (url) {
+      // 2) 사이트 분석 → 기능별 TC 생성.
+      //    기획서가 있으면 기획서가 다루는 화면을 찾기 위해 범위와 관계없이 세부 페이지까지 분석한다.
+      const crawlScope = result.doc ? 'all' : scope;
+      setPhase(crawlScope === 'all' ? '사이트 및 세부 페이지 분석 중' : '입력한 페이지 분석 중');
+      const genCode = await runNode([GENERATOR, url, `--scope=${crawlScope}`], { QA_OUTPUT_DIR: GENERATED_DIR });
+      if (genCode !== 0) throw new Error('사이트 분석에 실패했습니다. 로그를 확인해주세요.');
+
+      const analysisPath = path.join(GENERATED_DIR, 'analysis.json');
+      const analysis = JSON.parse(fs.readFileSync(analysisPath, 'utf-8'));
+      fs.copyFileSync(analysisPath, path.join(runDir, 'analysis.json'));
+
+      // 3) 기획서 TC ↔ 실제 화면 요소 매핑 → 기획서 기준 테스트 생성
+      let docSpecCount = 0;
+      if (result.doc) {
+        setPhase('기획서 TC와 화면 요소 매핑 중');
+        try {
+          mappings = await mapDocToFeatures(result.doc, analysis, llm);
+          fs.writeFileSync(path.join(runDir, 'doc-mappings.json'), JSON.stringify(mappings, null, 2), 'utf-8');
+          docSpecCount = writeDocSpecs({ doc: result.doc, mappings, analysis, outDir: path.join(GENERATED_DIR, 'doc') });
+          const c = (s) => mappings.filter((m) => m.status === s).length;
+          log(`[매핑] 자동 실행 ${c('automated')}건 · 화면에서 못 찾음 ${c('not_found')}건 · 수동 확인 ${c('manual')}건`);
+        } catch (e) {
+          result.errors.push(`기획서 매핑 실패: ${e.message}`);
+          log(`[매핑] 실패: ${e.message}`);
+        }
+      }
+
+      // 3-1) AI 테스트: 페이지 스크린샷 + 화면 요소 → AI 가 기대 동작 기준 TC 작성 + 화면 이슈 보고
+      if (mode === 'ai') {
+        setPhase('AI가 화면을 분석하고 TC 작성 중');
+        log(`[AI 분석] ${analysis.pages.length}개 페이지 분석 시작 (${llm.label} · ${llm.model})`);
+        try {
+          const ai = await analyzeSiteWithAi(analysis, GENERATED_DIR, llm, log);
+          aiMappings = ai.mappings;
+          result.ai = { doc: ai.doc, findings: ai.findings };
+          fs.writeFileSync(path.join(runDir, 'ai-mappings.json'), JSON.stringify(aiMappings, null, 2), 'utf-8');
+          writeDocSpecs({ doc: ai.doc, mappings: aiMappings, analysis, outDir: path.join(GENERATED_DIR, 'ai'), group: 'AI 분석', fileName: 'ai-testcases.spec.ts' });
+        } catch (e) {
+          result.errors.push(`AI 분석 실패: ${e.message}`);
+          log(`[AI 분석] 실패: ${e.message}`);
+        }
+      }
+
+      // 4) 실행. '입력한(첨부한) 사이트(PDF)만' + 기획서면 기획서 기반 테스트만 실행
+      const docOnly = scope === 'single' && result.doc && docSpecCount > 0;
+      setPhase(`${docOnly ? '기획서 기반 테스트' : '생성된 테스트'} 실행 중 (${browsers.map((b) => BROWSER_LABEL[b]).join(', ')})`);
+      const reportDir = path.join(runDir, 'report');
+      await runNode([PLAYWRIGHT_CLI, 'test', '--config', PLAYWRIGHT_CONFIG, '--reporter=list,html,json'], {
+        QA_TEST_SUBDIR: docOnly ? 'doc' : '',
+        QA_BROWSERS: browsers.join(','),
+        PLAYWRIGHT_JSON_OUTPUT_NAME: path.join(runDir, 'results.json'),
+        PLAYWRIGHT_HTML_OUTPUT_DIR: reportDir,
+        PLAYWRIGHT_HTML_REPORT: reportDir,
+        PLAYWRIGHT_HTML_OPEN: 'never',
+      });
+      result.tests = summarizeReport(path.join(runDir, 'results.json'));
+      if (!result.tests) throw new Error('테스트 결과를 찾을 수 없습니다.');
+      result.reportUrl = `/results/${id}/report/index.html`;
+    }
+  } catch (e) {
+    result.errors.push(e.message);
+    log(`[오류] ${e.message}`);
+  } finally {
+    if (result.ai) {
+      attachDocResults(result.ai.doc, aiMappings, result.tests, 'AI 분석');
+      fs.writeFileSync(path.join(runDir, 'ai-testcases.json'), JSON.stringify(result.ai, null, 2), 'utf-8');
+      fs.writeFileSync(path.join(runDir, 'ai-testcases.csv'), toCsv(result.ai.doc), 'utf-8');
+      result.ai.csvUrl = `/results/${id}/ai-testcases.csv`;
+    }
+    if (result.doc) {
+      attachDocResults(result.doc, mappings, result.tests, '기획서');
+      fs.writeFileSync(path.join(runDir, 'doc-testcases.json'), JSON.stringify(result.doc, null, 2), 'utf-8');
+      fs.writeFileSync(path.join(runDir, 'doc-testcases.csv'), toCsv(result.doc), 'utf-8');
+      result.docCsvUrl = `/results/${id}/doc-testcases.csv`;
+    }
+    result.finishedAt = Date.now();
+    fs.writeFileSync(path.join(runDir, 'summary.json'), JSON.stringify(result, null, 2), 'utf-8');
+    state.running = false;
+    state.result = result;
+    setPhase('');
+    broadcast('done', result);
+    lastSeen = Date.now();
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// HTTP
+// ─────────────────────────────────────────────────────────────
+
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.csv': 'text/csv; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.svg': 'image/svg+xml',
+  '.webm': 'video/webm',
+  '.zip': 'application/zip',
+  '.ico': 'image/x-icon',
+};
+
+function sendFile(res, baseDir, relPath) {
+  const filePath = path.normalize(path.join(baseDir, decodeURIComponent(relPath)));
+  if (!filePath.startsWith(baseDir) || !fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+    res.writeHead(404).end('Not found');
+    return;
+  }
+  const headers = { 'Content-Type': MIME[path.extname(filePath).toLowerCase()] || 'application/octet-stream' };
+  if (filePath.endsWith('.csv')) headers['Content-Disposition'] = `attachment; filename="${path.basename(filePath)}"`;
+  res.writeHead(200, headers);
+  fs.createReadStream(filePath).pipe(res);
+}
+
+function readJson(req, limit = 60 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > limit) {
+        reject(new Error('파일이 너무 큽니다 (최대 40MB).'));
+        req.destroy();
+      } else chunks.push(c);
+    });
+    req.on('end', () => {
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString('utf-8') || '{}'));
+      } catch (e) {
+        reject(e);
+      }
+    });
+  });
+}
+
+function json(res, status, body) {
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify(body));
+}
+
+/** API Key 는 settings.json 이 아닌 .env 에만 저장 (공급자별) */
+function saveApiKey(envKey, key) {
+  const lines = fs.existsSync(ENV_PATH) ? fs.readFileSync(ENV_PATH, 'utf-8').split(/\r?\n/) : [];
+  const rest = lines.filter((l) => l && !l.startsWith(`${envKey}=`));
+  fs.mkdirSync(path.dirname(ENV_PATH), { recursive: true });
+  fs.writeFileSync(ENV_PATH, [...rest, `${envKey}=${key}`].join('\n') + '\n', 'utf-8');
+  process.env[envKey] = key;
+}
+
+const server = http.createServer(async (req, res) => {
+  const { pathname } = new URL(req.url, APP_URL);
+  lastSeen = Date.now();
+
+  try {
+    if (req.method === 'GET' && pathname === '/') return sendFile(res, PUBLIC_DIR, 'index.html');
+    if (req.method === 'GET' && pathname.startsWith('/static/')) return sendFile(res, PUBLIC_DIR, pathname.slice(8));
+    if (req.method === 'GET' && pathname.startsWith('/results/')) {
+      const { base, rel } = resolveResultFile(pathname.slice(9));
+      return sendFile(res, base, rel);
+    }
+
+    if (req.method === 'GET' && pathname === '/api/state') {
+      return json(res, 200, {
+        name: APP_NAME,
+        version: VERSION,
+        running: state.running,
+        phase: state.phase,
+        logs: state.logs.slice(-300),
+        result: state.result,
+        hasApiKey: !!currentLlm().apiKey,
+        llm: llmSettingsView(),
+        resultsDir: settings.resultsDir,
+      });
+    }
+
+    if (req.method === 'POST' && pathname === '/api/results-dir') {
+      const body = await readJson(req);
+      let dir = body.dir;
+      if (body.pick) dir = await hooks.pickFolder(settings.resultsDir);
+      if (!dir) return json(res, 200, { resultsDir: settings.resultsDir, changed: false });
+      try {
+        setResultsDir(dir);
+      } catch (e) {
+        return json(res, 400, { error: `폴더를 사용할 수 없습니다: ${e.message}` });
+      }
+      return json(res, 200, { resultsDir: settings.resultsDir, changed: true });
+    }
+
+    if (req.method === 'POST' && pathname === '/api/open-folder') {
+      const body = await readJson(req);
+      const dir = body.id ? runDirs.get(body.id) || path.join(settings.resultsDir, body.id) : settings.resultsDir;
+      fs.mkdirSync(dir, { recursive: true });
+      hooks.openPath(dir);
+      return json(res, 200, { ok: true });
+    }
+
+    if (req.method === 'GET' && pathname === '/api/events') {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+      res.write(': connected\n\n');
+      clients.add(res);
+      req.on('close', () => clients.delete(res));
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/api/heartbeat') return json(res, 200, { ok: true });
+
+    if (req.method === 'POST' && pathname === '/api/settings') {
+      // { provider, apiKey?, model? } - provider 를 선택 공급자로 지정하고 키/모델 저장
+      const body = await readJson(req);
+      const provider = PROVIDERS[body.provider] ? body.provider : currentLlm().provider;
+      settings.llmProvider = provider;
+      if (typeof body.apiKey === 'string' && body.apiKey.trim()) saveApiKey(PROVIDERS[provider].envKey, body.apiKey.trim());
+      if (typeof body.model === 'string') settings.llmModels[provider] = body.model.trim();
+      saveSettings();
+      return json(res, 200, { hasApiKey: !!currentLlm().apiKey, llm: llmSettingsView() });
+    }
+
+    if (req.method === 'POST' && pathname === '/api/run') {
+      if (state.running) return json(res, 409, { error: '이미 실행 중인 작업이 있습니다.' });
+      const body = await readJson(req);
+      const url = (body.url || '').trim();
+      const scope = body.scope === 'single' ? 'single' : 'all';
+      const mode = body.mode === 'ai' ? 'ai' : 'basic';
+      const browsers = (Array.isArray(body.browsers) ? body.browsers : []).filter((b) => BROWSER_LABEL[b]);
+      if (!browsers.length) browsers.push('chromium');
+      if (mode === 'ai' && !url) return json(res, 400, { error: 'AI 테스트는 URL이 필요합니다.' });
+      if ((mode === 'ai' || body.file) && !currentLlm().apiKey) {
+        return json(res, 400, { error: `${currentLlm().label} API Key가 필요합니다. 상단 'AI 설정'에서 입력해주세요.` });
+      }
+      if (!url && !body.file) return json(res, 400, { error: 'URL 또는 기획서를 입력해주세요.' });
+      if (url) {
+        try {
+          if (!/^https?:$/.test(new URL(url).protocol)) throw new Error();
+        } catch {
+          return json(res, 400, { error: '올바른 URL 형식이 아닙니다. (예: https://example.com)' });
+        }
+      }
+      runJob({ url, scope, mode, browsers, file: body.file || null });
+      return json(res, 202, { ok: true });
+    }
+
+    res.writeHead(404).end('Not found');
+  } catch (e) {
+    json(res, 500, { error: e.message });
+  }
+});
+
+/**
+ * 서버 시작. port 0 이면 빈 포트를 자동 선택한다. 실제 접속 URL 을 반환.
+ */
+function start({ port = 0, hooks: overrides = {} } = {}) {
+  Object.assign(hooks, overrides);
+  prepareWorkspace();
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, '127.0.0.1', () => {
+      APP_URL = `http://127.0.0.1:${server.address().port}`;
+      resolve(APP_URL);
+    });
+  });
+}
+
+module.exports = { start, APP_NAME, VERSION };
+
+// ─────────────────────────────────────────────────────────────
+// 개발 모드 단독 실행: node app/server.js  (Edge/Chrome 앱 모드 창으로 열기)
+// ─────────────────────────────────────────────────────────────
+
+function openBrowserWindow() {
+  const candidates = [
+    path.join(process.env['ProgramFiles(x86)'] || '', 'Microsoft/Edge/Application/msedge.exe'),
+    path.join(process.env.ProgramFiles || '', 'Microsoft/Edge/Application/msedge.exe'),
+    path.join(process.env.ProgramFiles || '', 'Google/Chrome/Application/chrome.exe'),
+    path.join(process.env.LOCALAPPDATA || '', 'Google/Chrome/Application/chrome.exe'),
+  ];
+  const browser = candidates.find((p) => p && fs.existsSync(p));
+  const profileDir = path.join(__dirname, '.profile');
+  if (browser) {
+    spawn(browser, [`--app=${APP_URL}`, '--window-size=1180,900', `--user-data-dir=${profileDir}`, '--no-first-run'], {
+      detached: true,
+      stdio: 'ignore',
+    }).unref();
+  } else {
+    spawn('cmd', ['/c', 'start', '', APP_URL], { detached: true, stdio: 'ignore' }).unref();
+  }
+}
+
+if (require.main === module) {
+  const port = Number(process.env.QA_APP_PORT || 4780);
+  start({ port })
+    .then((url) => {
+      console.log(`${APP_NAME} v${VERSION} 실행 중: ${url}`);
+      if (!process.argv.includes('--no-window')) openBrowserWindow();
+      setInterval(() => {
+        if (!state.running && clients.size === 0 && Date.now() - lastSeen > IDLE_EXIT_MS) process.exit(0);
+      }, 10 * 1000);
+    })
+    .catch((e) => {
+      if (e.code !== 'EADDRINUSE') throw e;
+      // 이미 실행 중이면 창만 다시 연다
+      APP_URL = `http://127.0.0.1:${port}`;
+      openBrowserWindow();
+      process.exit(0);
+    });
+}
