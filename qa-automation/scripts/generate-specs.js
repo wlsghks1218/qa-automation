@@ -724,20 +724,45 @@ function kindOf(cand, spec) {
  * collectCommon: 헤더/메뉴/푸터 요소까지 분석 (시작 페이지, 그리고 서브도메인마다 첫 페이지)
  * commonAsFeatures: 서브도메인 첫 페이지처럼 공통 요소를 그 페이지 기능으로 함께 테스트할 때
  */
-async function analyzePage(context, pagePath, { commonSignatures, collectCommon, commonAsFeatures = false }) {
+async function analyzePage(newContext, pagePath, { commonSignatures, collectCommon, commonAsFeatures = false }) {
   const tag = pagePath;
   const step = (msg) => console.log(`   · [${tag}] ${msg}`);
   const url = urlOfTarget(pagePath);
+  // 페이지마다 새 브라우저 컨텍스트: 다른 페이지 분석 중 누른 버튼(사이드바 접기 등)이 남긴 상태가 섞이지 않게
+  const context = await newContext();
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
 
   const result = { path: pagePath, url, title: '', status: 0, keyTexts: [], texts: [], images: [], rolling: [], tables: [], pageType: 'general', features: [], common: [], skipped: [], errors };
 
+  // 처음 연 상태(쿠키 · localStorage · sessionStorage)를 기억해두고, 클릭 탐지 후마다 이 상태로 되돌린다.
+  // 생성된 테스트는 매번 새 브라우저에서 시작하므로, 분석도 같은 상태에서 관찰해야 결과가 어긋나지 않는다.
+  let initialCookies = [];
+  let initialStorage = { l: {}, s: {} };
+  const resetState = async () => {
+    await context.clearCookies().catch(() => {});
+    if (initialCookies.length) await context.addCookies(initialCookies).catch(() => {});
+    if (new URL(page.url()).origin !== new URL(url).origin) await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+    await page
+      .evaluate((snap) => {
+        localStorage.clear();
+        for (const [k, v] of Object.entries(snap.l)) localStorage.setItem(k, v);
+        sessionStorage.clear();
+        for (const [k, v] of Object.entries(snap.s)) sessionStorage.setItem(k, v);
+      }, initialStorage)
+      .catch(() => {});
+    await openForAnalysis(page, url).catch(() => {});
+  };
+
   try {
     const response = await openForAnalysis(page, url);
     result.status = response ? response.status() : 0;
     result.title = await page.title();
+    initialCookies = await context.cookies();
+    initialStorage = await page
+      .evaluate(() => ({ l: { ...localStorage }, s: { ...sessionStorage } }))
+      .catch(() => ({ l: {}, s: {} }));
 
     // 접속 차단(봇 차단/오류 응답)이면 화면 요소로 테스트를 만들지 않는다 → 상태 코드 검증만 남겨 결과에 드러나게 함
     const bodyText = await page.evaluate(() => document.body.innerText.slice(0, 2000)).catch(() => '');
@@ -921,13 +946,13 @@ async function analyzePage(context, pagePath, { commonSignatures, collectCommon,
       report(`${effect.tooltip ? `마우스 오버 "${short(effect.tooltip, 15)}" · ` : ''}${effect.type === 'unclickable' ? `클릭 불가(${short(effect.reason, 40)})` : '클릭'}`);
 
       if (effect.dirty) {
-        await openForAnalysis(page, url).catch(() => {});
+        await resetState();
       }
     }
   } catch (e) {
     result.skipped.push({ reason: `페이지 분석 실패: ${e.message.split('\n')[0]}` });
   } finally {
-    await page.close().catch(() => {});
+    await context.close().catch(() => {});
   }
   if (commonAsFeatures) {
     result.features = [...result.common, ...result.features];
@@ -1248,13 +1273,16 @@ function slugOf(pagePath) {
 
   // Headless Shell 을 따로 포함하지 않으므로 전체 Chromium 으로 백그라운드 실행
   const browser = await chromium.launch({ headless: true, channel: 'chromium' });
-  const context = await browser.newContext({
-    viewport: VIEWPORT,
-    locale: LOCALE,
-    timezoneId: TIMEZONE,
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    ...(STORAGE_STATE ? { storageState: STORAGE_STATE } : {}),
-  });
+  // 생성된 테스트와 같은 시작 상태(로그인 상태 파일만 있는 새 브라우저)로 만든다
+  const newContext = () =>
+    browser.newContext({
+      viewport: VIEWPORT,
+      locale: LOCALE,
+      timezoneId: TIMEZONE,
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      ...(STORAGE_STATE ? { storageState: STORAGE_STATE } : {}),
+    });
+  const context = await newContext(); // 페이지 발굴용
   if (STORAGE_STATE) console.log('[로그인] 저장된 로그인 상태로 분석합니다.');
 
   let targetPaths;
@@ -1274,7 +1302,7 @@ function slugOf(pagePath) {
   console.log(`\n[2/4] 시작 페이지 분석: 링크·버튼·펼치기·탭·입력 요소를 하나씩 직접 눌러 동작 확인 중...`);
   console.log(`  (헤더/메뉴/푸터처럼 모든 페이지에 반복되는 요소는 여기서 한 번만 확인합니다)`);
   const [startPath, ...subPaths] = targetPaths;
-  const home = await analyzePage(context, startPath, { commonSignatures: new Set(), collectCommon: true });
+  const home = await analyzePage(newContext, startPath, { commonSignatures: new Set(), collectCommon: true });
   const commonSignatures = new Set([...home.common, ...home.features].map((f) => f.signature));
   if (STORAGE_STATE && [...home.common, ...home.features].some((f) => f.inputType === 'password')) {
     console.warn('[로그인] 저장된 로그인으로 열었는데 비밀번호 입력창이 보입니다. 로그인이 만료되었을 수 있으니 "로그인 창 열기"로 다시 로그인해주세요.');
@@ -1296,7 +1324,7 @@ function slugOf(pagePath) {
   let done = 0;
   const subs = await runPool(subPaths, CONCURRENCY, async (p) => {
     const ownCommon = firstOfHost.has(p);
-    const r = await analyzePage(context, p, { commonSignatures, collectCommon: ownCommon, commonAsFeatures: ownCommon });
+    const r = await analyzePage(newContext, p, { commonSignatures, collectCommon: ownCommon, commonAsFeatures: ownCommon });
     done++;
     console.log(`  -> [${done}/${subPaths.length}] ${p} 완료: 기능 ${r.features.length}개 탐지${r.skipped.length ? `, 제외 ${r.skipped.length}개` : ''}`);
     return r;
