@@ -26,16 +26,18 @@ const run = (args, env = {}) =>
   execFileSync(process.execPath, args, { cwd: ROOT, stdio: 'inherit', env: { ...process.env, ...env } });
 
 (async () => {
-  console.log(`[1/3] 아이콘 생성`);
-  await buildIcons();
-
   // 앱에 포함할 테스트용 브라우저: Chrome(Chromium) · Safari(WebKit) · Firefox (대상 PC에 따로 설치할 필요 없음)
-  console.log(`\n[2/3] 테스트 브라우저 준비 (build/pw-browsers)`);
+  // 아이콘 생성에도 브라우저가 필요하므로 먼저 받는다 (빈 CI 서버에서도 동작하도록)
+  console.log(`[1/3] 테스트 브라우저 준비 (build/pw-browsers)`);
   const browsersDir = path.join(ROOT, 'build', 'pw-browsers');
   const cli = path.join(path.dirname(require.resolve('@playwright/test/package.json')), 'cli.js');
   run([cli, 'install', 'chromium', 'webkit', 'firefox'], { PLAYWRIGHT_BROWSERS_PATH: browsersDir });
   // 실행 잠금 파일 등은 포함하지 않는다
   for (const f of fs.readdirSync(browsersDir)) if (f.startsWith('.')) fs.rmSync(path.join(browsersDir, f), { recursive: true, force: true });
+
+  console.log(`\n[2/3] 아이콘 생성`);
+  process.env.PLAYWRIGHT_BROWSERS_PATH = browsersDir;
+  await buildIcons();
 
   console.log(`\n[3/3] 설치 파일 빌드: QA_Automation_KC v${version} (${target})`);
   const builder = path.join(path.dirname(require.resolve('electron-builder/package.json')), 'cli.js');
