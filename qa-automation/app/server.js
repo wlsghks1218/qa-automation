@@ -5,7 +5,7 @@ const { spawn } = require('child_process');
 
 const {
   ENV_PATH, SETTINGS_PATH, WORKSPACE, GENERATED_DIR, DEFAULT_RESULTS_DIR,
-  GENERATOR, PLAYWRIGHT_CONFIG, PLAYWRIGHT_CLI, prepareWorkspace,
+  GENERATOR, PLAYWRIGHT_CONFIG, PLAYWRIGHT_CLI, AUTH_DIR, LOGIN_SCRIPT, CODE_ROOT, prepareWorkspace,
 } = require('./paths');
 require('dotenv').config({ path: ENV_PATH, quiet: true });
 
@@ -159,6 +159,64 @@ function runNode(args, env = {}) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// 로그인: 사람이 직접 로그인한 상태(쿠키·저장소)를 사이트(host)별로 저장해 분석·테스트에 사용
+// ─────────────────────────────────────────────────────────────
+
+const authPathFor = (url) => path.join(AUTH_DIR, `${new URL(url).host.replace(/[^a-z0-9.-]/gi, '_')}.json`);
+
+function authInfo(url) {
+  try {
+    const p = authPathFor(url);
+    const base = { host: new URL(url).host, active: !!loginSession && loginSession.host === new URL(url).host };
+    if (!fs.existsSync(p)) return { ...base, saved: false };
+    return { ...base, saved: true, savedAt: fs.statSync(p).mtimeMs };
+  } catch {
+    return { saved: false, active: false };
+  }
+}
+
+let loginSession = null; // { child, host, url }
+
+function startLogin(url) {
+  if (loginSession) loginSession.child.kill();
+  const child = spawn(process.execPath, [LOGIN_SCRIPT, url, authPathFor(url)], {
+    cwd: WORKSPACE,
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', FORCE_COLOR: '0' },
+  });
+  const session = { child, host: new URL(url).host, url };
+  loginSession = session;
+  const pipe = (stream) => stream.on('data', (d) => d.toString('utf-8').split(/\r?\n/).forEach(log));
+  pipe(child.stdout);
+  pipe(child.stderr);
+  session.closed = new Promise((resolve) => child.on('close', (code) => {
+    if (loginSession === session) loginSession = null;
+    broadcast('login', authInfo(url));
+    resolve(code);
+  }));
+  broadcast('login', authInfo(url));
+}
+
+/** URL 이 로그인 화면인지 확인 (헤드리스로 잠깐 열어봄) */
+function checkLogin(url) {
+  return new Promise((resolve) => {
+    let out = '';
+    const p = authPathFor(url);
+    const child = spawn(process.execPath, [path.join(CODE_ROOT, 'scripts', 'login-check.js'), url, ...(fs.existsSync(p) ? [p] : [])], {
+      cwd: WORKSPACE,
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    });
+    child.stdout.on('data', (d) => (out += d.toString('utf-8')));
+    child.on('close', () => {
+      try {
+        resolve(JSON.parse(out.trim().split(/\r?\n/).pop()));
+      } catch {
+        resolve({ error: '확인 실패' });
+      }
+    });
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
 // Playwright JSON 결과 → 화면 표시용 요약
 // ─────────────────────────────────────────────────────────────
 
@@ -269,7 +327,7 @@ function attachDocResults(doc, mappings, tests, group) {
   };
 }
 
-async function runJob({ url, scope, file, mode, browsers }) {
+async function runJob({ url, scope, file, mode, browsers, useLogin }) {
   const id = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const runDir = path.join(settings.resultsDir, id);
   fs.mkdirSync(runDir, { recursive: true });
@@ -289,6 +347,7 @@ async function runJob({ url, scope, file, mode, browsers }) {
   const llm = currentLlm();
   let mappings = null;
   let plan = null; // 생성기 케이스 목록 (cases.json)
+  const loginEnv = {};
   let aiMappings = null;
 
   try {
@@ -310,7 +369,13 @@ async function runJob({ url, scope, file, mode, browsers }) {
       //    기획서가 있으면 기획서가 다루는 화면을 찾기 위해 범위와 관계없이 세부 페이지까지 분석한다.
       const crawlScope = result.doc ? 'all' : scope;
       setPhase(crawlScope === 'all' ? '사이트 및 세부 페이지 분석 중' : '입력한 페이지 분석 중');
-      const genCode = await runNode([GENERATOR, url, `--scope=${crawlScope}`], { QA_OUTPUT_DIR: GENERATED_DIR });
+      // 저장된 로그인이 있고 사용하기로 했으면 분석·테스트 모두 로그인된 상태로 (데이터가 바뀌는 버튼은 누르지 않는 안전 모드)
+      if (useLogin && authInfo(url).saved) {
+        loginEnv.QA_STORAGE_STATE = authPathFor(url);
+        result.loggedIn = true;
+        log(`[로그인] ${new URL(url).host} 저장된 로그인 상태로 테스트합니다 (안전 모드).`);
+      }
+      const genCode = await runNode([GENERATOR, url, `--scope=${crawlScope}`], { QA_OUTPUT_DIR: GENERATED_DIR, ...loginEnv });
       if (genCode !== 0) throw new Error('사이트 분석에 실패했습니다. 로그를 확인해주세요.');
 
       const analysisPath = path.join(GENERATED_DIR, 'analysis.json');
@@ -374,6 +439,7 @@ async function runJob({ url, scope, file, mode, browsers }) {
         PLAYWRIGHT_HTML_OUTPUT_DIR: reportDir,
         PLAYWRIGHT_HTML_REPORT: reportDir,
         PLAYWRIGHT_HTML_OPEN: 'never',
+        ...loginEnv,
       });
       result.tests = summarizeReport(path.join(runDir, 'results.json'));
       if (!result.tests) throw new Error('테스트 결과를 찾을 수 없습니다.');
@@ -547,6 +613,39 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { hasApiKey: !!currentLlm().apiKey, llm: llmSettingsView() });
     }
 
+    if (pathname.startsWith('/api/login')) {
+      const body = req.method === 'POST' ? await readJson(req) : {};
+      const target = body.url || new URL(req.url, 'http://x').searchParams.get('url') || (loginSession && loginSession.url);
+      try {
+        if (!target || !/^https?:$/.test(new URL(target).protocol)) throw new Error();
+      } catch {
+        return json(res, 400, { error: '올바른 URL을 먼저 입력해주세요.' });
+      }
+      if (req.method === 'GET' && pathname === '/api/login') return json(res, 200, authInfo(target));
+      if (req.method === 'POST' && pathname === '/api/login/check') return json(res, 200, { ...(await checkLogin(target)), ...authInfo(target) });
+      if (req.method === 'POST' && pathname === '/api/login/start') {
+        if (state.running) return json(res, 409, { error: '테스트 실행 중에는 로그인 창을 열 수 없습니다.' });
+        startLogin(target);
+        return json(res, 200, authInfo(target));
+      }
+      if (req.method === 'POST' && pathname === '/api/login/done') {
+        if (!loginSession) return json(res, 400, { error: '열려 있는 로그인 창이 없습니다.' });
+        const session = loginSession;
+        session.child.stdin.write('save' + String.fromCharCode(10));
+        const code = await session.closed;
+        if (code !== 0) return json(res, 500, { error: '로그인 상태를 저장하지 못했습니다. 로그를 확인해주세요.' });
+        return json(res, 200, authInfo(target));
+      }
+      if (req.method === 'POST' && pathname === '/api/login/cancel') {
+        if (loginSession) loginSession.child.kill();
+        return json(res, 200, authInfo(target));
+      }
+      if (req.method === 'POST' && pathname === '/api/login/clear') {
+        fs.rmSync(authPathFor(target), { force: true });
+        return json(res, 200, authInfo(target));
+      }
+    }
+
     if (req.method === 'POST' && pathname === '/api/run') {
       if (state.running) return json(res, 409, { error: '이미 실행 중인 작업이 있습니다.' });
       const body = await readJson(req);
@@ -567,7 +666,8 @@ const server = http.createServer(async (req, res) => {
           return json(res, 400, { error: '올바른 URL 형식이 아닙니다. (예: https://example.com)' });
         }
       }
-      runJob({ url, scope, mode, browsers, file: body.file || null });
+      if (loginSession) return json(res, 409, { error: '로그인 창이 열려 있습니다. 로그인을 끝내고 "로그인 완료"를 누르거나 취소해주세요.' });
+      runJob({ url, scope, mode, browsers, file: body.file || null, useLogin: body.useLogin !== false });
       return json(res, 202, { ok: true });
     }
 

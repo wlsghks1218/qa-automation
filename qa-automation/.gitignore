@@ -16,3 +16,4 @@ node_modules/
 /build/pw-browsers/
 /settings.json
 /tests/generated/
+/auth/

@@ -15,6 +15,9 @@ const paths = {
   WORKSPACE,
   ENV_PATH: path.join(USER_DIR, '.env'),
   SETTINGS_PATH: path.join(USER_DIR, 'settings.json'),
+  // 사이트별 로그인 상태(쿠키·저장소). 계정 권한이 담기므로 이 PC 에만 두고 결과 폴더·git 에 넣지 않는다
+  AUTH_DIR: path.join(USER_DIR, 'auth'),
+  LOGIN_SCRIPT: path.join(CODE_ROOT, 'scripts', 'login-session.js'),
   GENERATED_DIR: path.join(WORKSPACE, 'tests', 'generated'),
   DEFAULT_RESULTS_DIR: process.env.QA_DEFAULT_RESULTS || path.join(CODE_ROOT, 'results'),
   GENERATOR: path.join(CODE_ROOT, 'scripts', 'generate-specs.js'),

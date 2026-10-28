@@ -39,7 +39,16 @@ const POPUP_CLOSE = /^(닫기|close|dismiss|×|✕)$/i;
 const isPopupControl = (name) => [POPUP_DISMISS, POPUP_CONSENT, POPUP_CLOSE].some((re) => re.test(name));
 
 // 실서비스에 부작용을 줄 수 있는 요소는 클릭 탐지 대상에서 제외
-const RISKY = /(삭제|탈퇴|로그아웃|송금|출금하기|결제하기|구매하기|logout|delete|withdraw)/i;
+// 로그아웃은 로그인 상태로 테스트할 때 세션이 끊기므로 누르지 않는다
+const BASE_RISKY = /(삭제|탈퇴|로그아웃|송금|출금하기|결제하기|구매하기|log\s?out|sign\s?out|delete|withdraw)/i;
+// 로그인 상태 파일 (앱에서 '로그인 창 열기'로 저장). 있으면 로그인된 상태로 분석한다
+const STORAGE_STATE = process.env.QA_STORAGE_STATE && fs.existsSync(process.env.QA_STORAGE_STATE) ? process.env.QA_STORAGE_STATE : null;
+// 로그인 상태(안전 모드)에서는 실제 계정 데이터를 바꾸는 버튼도 누르지 않는다 (노출·문구만 확인)
+const DATA_CHANGING = /(출근|퇴근|출석|체크인|저장|등록|신청|제출|전송|보내기|발송|승인|반려|초기화|변경|업로드|작성\s?완료|save|submit|send|apply|register|approve|reject|reset|upload|check\s?in)/i;
+const RISKY = { test: (name) => BASE_RISKY.test(name) || (!!STORAGE_STATE && DATA_CHANGING.test(name)) };
+const RISKY_REASON = STORAGE_STATE
+  ? '로그인 안전 모드: 삭제·결제·제출·저장·출근 등 데이터가 바뀌는 버튼은 클릭하지 않음'
+  : '부작용 위험(삭제/결제/제출 등)으로 클릭하지 않음';
 
 const INTERACTIVE_SELECTOR = [
   'a[href]',
@@ -58,7 +67,8 @@ const INTERACTIVE_SELECTOR = [
 const BOT_CHECK = /just a moment|attention required|verify you are human|checking your browser|잠시만 기다리십시오|보안 확인 수행 중|사람인지 확인/i;
 
 // 모달/시트 안의 닫기 컨트롤
-const DIALOG_CLOSE = /^(닫기|close|취소|cancel|확인|×|✕|x)$/i;
+// 로그인 상태에서는 '확인'이 "정말 진행할까요?"의 승인일 수 있으므로 닫기·취소·ESC 로만 닫는다
+const DIALOG_CLOSE = STORAGE_STATE ? /^(닫기|close|취소|cancel|×|✕|x)$/i : /^(닫기|close|취소|cancel|확인|×|✕|x)$/i;
 
 // 화면 구조로 판별하는 페이지 유형 (URL 규칙은 사이트마다 달라 쓰지 않는다)
 const PAGE_TYPE_LABEL = { form: '입력폼형', list: '목록형', document: '문서형', general: '일반형', blocked: '접속 차단' };
@@ -834,7 +844,7 @@ async function analyzePage(context, pagePath, { commonSignatures, collectCommon 
         continue;
       }
       if (risky) {
-        result[bucket].push({ ...base, type: 'display', reason: '부작용 위험(삭제/결제/제출 등)으로 클릭하지 않음' });
+        result[bucket].push({ ...base, type: 'display', reason: RISKY_REASON });
         report('클릭 생략(부작용 위험)');
         continue;
       }
@@ -1183,7 +1193,9 @@ function slugOf(pagePath) {
     locale: LOCALE,
     timezoneId: TIMEZONE,
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    ...(STORAGE_STATE ? { storageState: STORAGE_STATE } : {}),
   });
+  if (STORAGE_STATE) console.log('[로그인] 저장된 로그인 상태로 분석합니다.');
 
   let targetPaths;
   if (SCOPE === 'single') {
@@ -1204,6 +1216,9 @@ function slugOf(pagePath) {
   const [startPath, ...subPaths] = targetPaths;
   const home = await analyzePage(context, startPath, { commonSignatures: new Set(), collectCommon: true });
   const commonSignatures = new Set([...home.common, ...home.features].map((f) => f.signature));
+  if (STORAGE_STATE && [...home.common, ...home.features].some((f) => f.inputType === 'password')) {
+    console.warn('[로그인] 저장된 로그인으로 열었는데 비밀번호 입력창이 보입니다. 로그인이 만료되었을 수 있으니 "로그인 창 열기"로 다시 로그인해주세요.');
+  }
   console.log(`  -> 시작 페이지 기능 ${home.features.length}개, 공통 기능 ${home.common.length}개`);
 
   console.log(`\n[3/4] 세부 페이지 ${subPaths.length}개 분석: 각 페이지 본문의 링크·버튼·펼치기·입력 요소 동작 확인 중 (동시 ${CONCURRENCY}개)...`);

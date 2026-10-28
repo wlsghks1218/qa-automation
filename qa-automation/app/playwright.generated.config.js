@@ -1,6 +1,7 @@
 // 프로그램이 생성한 테스트(tests/generated) 실행 전용 설정
 const { defineConfig, devices } = require('@playwright/test');
 const path = require('path');
+const fs = require('fs');
 const { WORKSPACE, GENERATED_DIR } = require('./paths');
 
 const BROWSERS = {
@@ -21,6 +22,8 @@ module.exports = defineConfig({
   // 네트워크 일시 지연 대비 1회 재시도. 재시도로 통과한 테스트는 결과에 '불안정'으로 표시된다
   retries: 1,
   use: {
+    // 앱에서 저장한 로그인 상태가 있으면 모든 테스트를 로그인된 상태로 시작
+    ...(process.env.QA_STORAGE_STATE && fs.existsSync(process.env.QA_STORAGE_STATE) ? { storageState: process.env.QA_STORAGE_STATE } : {}),
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',

@@ -256,6 +256,12 @@
   @media (max-width: 720px) { .browsers, .run-buttons { grid-template-columns: 1fr; } }
 
   .dir-row { display: flex; gap: 8px; align-items: center; }
+  .login-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .login-state { flex: 1; min-width: 200px; font-size: 13px; color: var(--muted); }
+  .login-state.saved { color: var(--pass); font-weight: 600; }
+  .login-state.active { color: var(--accent, #3b5bdb); font-weight: 600; }
+  .login-use { display: flex; gap: 6px; align-items: baseline; margin-top: 8px; font-size: 13px; }
+  .primary.small { padding: 8px 14px; font-size: 13px; white-space: nowrap; }
   .dir-path {
     flex: 1; min-width: 0; padding: 9px 14px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface-2);
     font: 12.5px/1.5 Consolas, "D2Coding", monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left;
@@ -300,6 +306,19 @@
     <div class="field">
       <label class="label" for="url">URL</label>
       <input class="url-input" id="url" type="url" placeholder="https://example.com" autocomplete="off" spellcheck="false">
+    </div>
+
+    <div class="field" id="loginField">
+      <span class="label">로그인 <span class="hint">· 로그인해야 보이는 화면까지 테스트할 때. ID/PW · SNS 로그인 · 인증 모두 직접 진행</span></span>
+      <div class="login-row">
+        <span class="login-state" id="loginState">URL을 입력하면 로그인 필요 여부를 확인합니다</span>
+        <button class="ghost small" type="button" id="loginOpen">로그인 창 열기</button>
+        <button class="primary small" type="button" id="loginDone" hidden>로그인 완료</button>
+        <button class="ghost small" type="button" id="loginCancel" hidden>취소</button>
+        <button class="ghost small" type="button" id="loginClear" hidden>저장된 로그인 삭제</button>
+      </div>
+      <label class="login-use" id="loginUseRow" hidden><input type="checkbox" id="useLogin" checked> 저장된 로그인으로 테스트 <span class="hint">· 안전 모드: 출근·저장·등록·제출·삭제처럼 데이터가 바뀌는 버튼은 누르지 않고 노출·문구만 확인</span></label>
+      <div class="notice warn" id="loginNotice"></div>
     </div>
 
     <div class="field">
@@ -554,6 +573,95 @@
     return '';
   }
 
+  // ── 로그인 (사람이 직접 로그인한 상태를 사이트별로 저장해서 사용) ─────
+  let loginActive = false;
+  let checkTimer = null;
+  let checkSeq = 0;
+
+  function validUrl() {
+    try {
+      const u = new URL($('url').value.trim());
+      return /^https?:$/.test(u.protocol) ? u.href : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function showLogin(info) {
+    if (!info || info.error) return;
+    loginActive = !!info.active;
+    const st = $('loginState');
+    st.className = 'login-state' + (loginActive ? ' active' : info.saved ? ' saved' : '');
+    st.textContent = loginActive
+      ? '로그인 창이 열려 있습니다. 로그인(인증 포함)을 끝낸 뒤 "로그인 완료"를 눌러주세요.'
+      : info.saved
+        ? `${info.host} 로그인 저장됨 (${new Date(info.savedAt).toLocaleString('ko-KR')})`
+        : '저장된 로그인 없음';
+    $('loginOpen').hidden = loginActive;
+    $('loginOpen').textContent = info.saved ? '다시 로그인' : '로그인 창 열기';
+    $('loginDone').hidden = !loginActive;
+    $('loginCancel').hidden = !loginActive;
+    $('loginClear').hidden = loginActive || !info.saved;
+    $('loginUseRow').hidden = !info.saved;
+  }
+
+  async function loginApi(action, extra = {}) {
+    const url = validUrl() || undefined;
+    const res = await fetch(`/api/login${action ? '/' + action : ''}`, { method: 'POST', body: JSON.stringify({ url, ...extra }) });
+    const body = await res.json();
+    if (!res.ok) {
+      $('loginNotice').textContent = body.error;
+      $('loginNotice').classList.add('show');
+      return null;
+    }
+    $('loginNotice').classList.remove('show');
+    return body;
+  }
+
+  // URL 을 바꾸면 저장된 로그인 확인 → 없으면 로그인 화면인지 잠깐 열어서 확인
+  function onUrlChange() {
+    clearTimeout(checkTimer);
+    const url = validUrl();
+    $('loginNotice').classList.remove('show');
+    if (!url) return showLogin({ saved: false, active: loginActive });
+    checkTimer = setTimeout(async () => {
+      const seq = ++checkSeq;
+      const info = await fetch(`/api/login?url=${encodeURIComponent(url)}`).then((r) => r.json()).catch(() => null);
+      if (seq !== checkSeq) return;
+      showLogin(info);
+      if (!info || info.saved || info.active) return;
+      $('loginState').textContent = '로그인이 필요한 페이지인지 확인 중…';
+      const chk = await loginApi('check');
+      if (seq !== checkSeq || !chk) return;
+      showLogin(chk);
+      if (chk.needLogin || chk.hasLoginButton) {
+        $('loginNotice').innerHTML = chk.needLogin
+          ? '이 페이지는 <b>로그인 화면</b>입니다. 로그인 없이 테스트하면 로그인 화면만 확인합니다. 안쪽 화면까지 테스트하려면 "로그인 창 열기"로 먼저 로그인해주세요.'
+          : `로그인 버튼이 있습니다 (${chk.buttons.map((b) => esc(b)).join(', ')}). 로그인해야 보이는 화면까지 테스트하려면 "로그인 창 열기"로 먼저 로그인해주세요.`;
+        $('loginNotice').classList.add('show');
+      }
+    }, 700);
+  }
+  $('url').addEventListener('input', onUrlChange);
+
+  $('loginOpen').addEventListener('click', async () => {
+    if (!validUrl()) return showError('로그인할 사이트의 URL을 먼저 입력해주세요.');
+    const info = await loginApi('start');
+    if (info) showLogin({ ...info, active: true });
+  });
+  $('loginDone').addEventListener('click', async () => {
+    $('loginDone').disabled = true;
+    $('loginState').textContent = '로그인 상태 저장 중…';
+    const info = await loginApi('done');
+    $('loginDone').disabled = false;
+    if (info) showLogin(info);
+  });
+  $('loginCancel').addEventListener('click', async () => showLogin(await loginApi('cancel')));
+  $('loginClear').addEventListener('click', async () => {
+    if (!confirm('저장된 로그인 상태를 삭제할까요?')) return;
+    showLogin(await loginApi('clear'));
+  });
+
   async function start(mode) {
     $('formError').classList.remove('show');
     const url = $('url').value.trim();
@@ -563,7 +671,8 @@
     if (selectedFile) {
       file = { name: selectedFile.name, type: mimeOf(selectedFile), data: await readFile(selectedFile) };
     }
-    const res = await fetch('/api/run', { method: 'POST', body: JSON.stringify({ url, scope, mode, browsers, file }) });
+    const useLogin = !$('loginUseRow').hidden && $('useLogin').checked;
+    const res = await fetch('/api/run', { method: 'POST', body: JSON.stringify({ url, scope, mode, browsers, file, useLogin }) });
     if (!res.ok) return showError((await res.json()).error || '실행할 수 없습니다.');
   }
   $('runBasic').addEventListener('click', () => start('basic'));
@@ -804,6 +913,12 @@
     });
     es.addEventListener('phase', (e) => { const p = JSON.parse(e.data); if (p) $('phaseText').textContent = p; });
     es.addEventListener('log', (e) => appendLog(JSON.parse(e.data)));
+    // 로그인 창이 닫히거나 저장되면 상태 갱신 (사용자가 창을 직접 닫은 경우 포함)
+    es.addEventListener('login', (e) => {
+      const info = JSON.parse(e.data);
+      const url = validUrl();
+      if (url && new URL(url).host === info.host) showLogin(info);
+    });
     es.addEventListener('done', (e) => {
       setRunning(false);
       renderResult(JSON.parse(e.data));
