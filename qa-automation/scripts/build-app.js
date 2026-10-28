@@ -33,9 +33,13 @@ const run = (args, env = {}) =>
   // 아이콘 생성에도 브라우저가 필요하므로 먼저 받는다 (빈 CI 서버에서도 동작하도록)
   console.log(`[1/3] 테스트 브라우저 준비 (build/pw-browsers)`);
   const cli = path.join(path.dirname(require.resolve('@playwright/test/package.json')), 'cli.js');
-  run([cli, 'install', 'chromium', 'webkit', 'firefox'], { PLAYWRIGHT_BROWSERS_PATH: browsersDir });
+  // --no-shell: Chromium Headless Shell(약 270MB)은 받지 않는다. 백그라운드 실행도 전체 Chromium 으로 한다 (channel: 'chromium')
+  run([cli, 'install', '--no-shell', 'chromium', 'webkit', 'firefox'], { PLAYWRIGHT_BROWSERS_PATH: browsersDir });
   // 실행 잠금 파일 등은 포함하지 않는다
-  for (const f of fs.readdirSync(browsersDir)) if (f.startsWith('.')) fs.rmSync(path.join(browsersDir, f), { recursive: true, force: true });
+  // 이전 빌드에서 받아둔 Headless Shell 도 포함하지 않는다
+  for (const f of fs.readdirSync(browsersDir)) {
+    if (f.startsWith('.') || f.startsWith('chromium_headless_shell')) fs.rmSync(path.join(browsersDir, f), { recursive: true, force: true });
+  }
 
   console.log(`\n[2/3] 아이콘 생성`);
   await buildIcons();

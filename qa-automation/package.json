@@ -83,7 +83,9 @@
       ],
       "icon": "build/icon.png",
       "category": "public.app-category.developer-tools",
-      "identity": null,
+      "identity": "-",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
       "artifactName": "${productName}_v${env.QA_DISPLAY_VERSION}_${arch}.${ext}"
     }
   },

@@ -4,7 +4,8 @@ const path = require('path');
 const { WORKSPACE, GENERATED_DIR } = require('./paths');
 
 const BROWSERS = {
-  chromium: { name: 'Chrome', use: { ...devices['Desktop Chrome'] } },
+  // channel 'chromium': 별도 Headless Shell 없이 전체 Chromium 으로 백그라운드 실행 (설치 파일 용량 절감)
+  chromium: { name: 'Chrome', use: { ...devices['Desktop Chrome'], channel: 'chromium' } },
   webkit: { name: 'Safari', use: { ...devices['Desktop Safari'] } },
   firefox: { name: 'Firefox', use: { ...devices['Desktop Firefox'] } },
 };

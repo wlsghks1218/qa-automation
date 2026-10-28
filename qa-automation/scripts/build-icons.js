@@ -34,7 +34,7 @@ function pngToIco(png) {
 }
 
 async function buildIcons() {
-  const browser = await chromium.launch();
+  const browser = await chromium.launch({ channel: 'chromium' });
   const page = await browser.newPage();
   const png256 = await render(page, 256);
   const png1024 = await render(page, 1024);

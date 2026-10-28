@@ -1176,7 +1176,8 @@ function slugOf(pagePath) {
   }
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
-  const browser = await chromium.launch({ headless: true });
+  // Headless Shell 을 따로 포함하지 않으므로 전체 Chromium 으로 백그라운드 실행
+  const browser = await chromium.launch({ headless: true, channel: 'chromium' });
   const context = await browser.newContext({
     viewport: VIEWPORT,
     locale: LOCALE,
