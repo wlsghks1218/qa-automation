@@ -1,7 +1,7 @@
 const { chromium } = require('@playwright/test');
 const fs = require('fs');
 const path = require('path');
-const { short, escapeRegex, locatorCode, urlMatcher, specHeader } = require('./lib/codegen');
+const { short, escapeRegex, locatorCode, urlMatcher, specHeader, textPattern, hasNumber } = require('./lib/codegen');
 const { findTypos } = require('./lib/typo');
 const { buildCasesHtml } = require('../app/cases-report');
 
@@ -542,8 +542,10 @@ async function probeClick(page, loc, spec, noisy) {
   }
 
   const after = await pageState(page);
-  const beforeLines = new Set(before.lines);
-  const fresh = (t) => !beforeLines.has(t) && !noisy.has(t) && isAssertableText(t);
+  // 숫자만 바뀐 줄(새로고침 후 '전체 690건' → '693건', 시계 등)은 새로 나타난 문구로 보지 않는다
+  const shape = (t) => t.replace(/\d+(?:[.,:]\d+)*/g, '#');
+  const beforeShapes = new Set(before.lines.map(shape));
+  const fresh = (t) => !beforeShapes.has(shape(t)) && !noisy.has(t) && isAssertableText(t);
 
   const beforeKeys = new Set(before.overlays.map((o) => o.key));
   const newOverlay = after.overlays.find((o) => !beforeKeys.has(o.key));
@@ -1079,7 +1081,7 @@ function actionCode(f) {
     case 'reveal':
       // 열린 창의 문구가 화면 다른 곳(누른 버튼 자체 등)에도 있을 수 있으므로
       // '보이는가'가 아니라 '보이는 개수가 늘었다가 원래대로 돌아오는가'로 판정한다
-      body.push(`const shown = page.getByText(${JSON.stringify(f.text)}).filter({ visible: true });`);
+      body.push(`const shown = page.getByText(${textPattern(f.text, false)}).filter({ visible: true });`);
       body.push(`const before = await shown.count();`);
       body.push(`await target.click();`);
       body.push(`await expect.poll(() => shown.count(), { message: ${JSON.stringify(`클릭 후 "${short(f.text, 30)}" 이(가) 나타나지 않음`)} }).toBeGreaterThan(before);`);
@@ -1155,7 +1157,7 @@ function elementTest(f, no, typos) {
   out.push(`    await c.run('노출', async () => { await expect(target).toBeVisible(); }, { gate: true });`);
   // 요소 안 문구는 줄마다 따로 확인 (버튼 문구 / 말풍선 문구 / 배너 제목·설명이 각각 결과로 보이도록)
   for (const l of f.lines || []) {
-    out.push(`    await c.run(${JSON.stringify(`문구: "${q(l, 40)}"`)}, async () => { await expect(target).toContainText(${JSON.stringify(l)}); });`);
+    out.push(`    await c.run(${JSON.stringify(`문구: "${q(l, 40)}"${hasNumber(l) ? ' (숫자는 형식만 확인)' : ''}`)}, async () => { await expect(target).toContainText(${textPattern(l, false)}); });`);
     if (typos.has(l)) out.push(`    c.warn(${JSON.stringify(l)}, ${JSON.stringify(typos.get(l))});`);
   }
   if (f.hasImg) {
@@ -1197,8 +1199,8 @@ function contentTest(items, no, typos) {
   out.push(`    const c = checks();`);
   for (const it of items) {
     if (it.kind === 'text') {
-      out.push(`    await c.run(${JSON.stringify(`문구 노출: "${q(it.text, 40)}"`)}, async () => {`);
-      out.push(`      await expect(page.getByText(${JSON.stringify(it.text)}, { exact: true }).filter({ visible: true }).first()).toBeVisible();`);
+      out.push(`    await c.run(${JSON.stringify(`문구 노출: "${q(it.text, 40)}"${hasNumber(it.text) ? ' (숫자는 형식만 확인)' : ''}`)}, async () => {`);
+      out.push(`      await expect(page.getByText(${hasNumber(it.text) ? textPattern(it.text, true) : `${JSON.stringify(it.text)}, { exact: true }`}).filter({ visible: true }).first()).toBeVisible();`);
       out.push(`    });`);
       if (typos.has(it.text)) out.push(`    c.warn(${JSON.stringify(it.text)}, ${JSON.stringify(typos.get(it.text))});`);
     } else {

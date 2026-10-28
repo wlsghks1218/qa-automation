@@ -18,6 +18,22 @@ function locatorCode(spec) {
   return `${base}.nth(${spec.nth})`;
 }
 
+/**
+ * 문구 비교용 코드. 숫자(건수 · 날짜 · 시간 · 금액)는 시간이 지나면 바뀌므로
+ * 숫자 자리는 '아무 숫자'로 바꾼 정규식으로 형식만 비교한다. 숫자가 없으면 문자열 그대로.
+ * anchored: 문구 전체가 일치해야 하는지 (getByText 용) / 아니면 포함 여부 (toContainText 용)
+ */
+const NUM = /\d+(?:[.,:]\d+)*/g;
+const hasNumber = (t) => /\d/.test(t);
+function textPattern(t, anchored) {
+  if (!hasNumber(t)) return JSON.stringify(t);
+  const body = t
+    .split(NUM)
+    .map(escapeRegex)
+    .join('\\d+(?:[.,:]\\d+)*');
+  return `new RegExp(${JSON.stringify(anchored ? `^${body}$` : body)})`;
+}
+
 /** URL 비교용 정규식 코드. hostOnly 면 origin 까지만 비교 */
 function urlMatcher(url, hostOnly) {
   const u = new URL(url);
@@ -39,4 +55,4 @@ function specHeader({ describeTitle, env, supportPath, generator }) {
   ];
 }
 
-module.exports = { escapeRegex, short, locatorCode, urlMatcher, specHeader };
+module.exports = { escapeRegex, short, locatorCode, urlMatcher, specHeader, textPattern, hasNumber };
