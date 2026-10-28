@@ -173,6 +173,13 @@ function summarizeReport(jsonPath) {
     (suite.specs || []).forEach((spec) => {
       spec.tests.forEach((t) => {
         const last = t.results[t.results.length - 1] || {};
+        // 생성된 테스트의 checks() 기록: "항목|passed/failed/skipped/warning|상세"
+        const checks = (last.annotations || t.annotations || [])
+          .filter((a) => a.type === 'check')
+          .map((a) => {
+            const [name, status, ...detail] = (a.description || '').split('|');
+            return { name, status, detail: detail.join('|') };
+          });
         const group = titles.filter((s) => !s.endsWith('.ts')).join(' › ') || spec.file;
         if (!groups.has(group)) groups.set(group, []);
         groups.get(group).push({
@@ -180,6 +187,7 @@ function summarizeReport(jsonPath) {
           browser: t.projectName,
           status: STATUS[t.status] || t.status,
           duration: last.duration || 0,
+          checks,
           error: last.error ? (last.error.message || '').replace(/\x1b\[[0-9;]*m/g, '').split('\n').slice(0, 6).join('\n') : '',
         });
       });
@@ -306,6 +314,8 @@ async function runJob({ url, scope, file, mode, browsers }) {
       const analysisPath = path.join(GENERATED_DIR, 'analysis.json');
       const analysis = JSON.parse(fs.readFileSync(analysisPath, 'utf-8'));
       fs.copyFileSync(analysisPath, path.join(runDir, 'analysis.json'));
+      // 규칙 기반 오타 의심 (LLM 없이). 테스트 실패가 아니라 경고로 따로 보여준다
+      result.typos = analysis.typos || [];
 
       // 3) 기획서 TC ↔ 실제 화면 요소 매핑 → 기획서 기준 테스트 생성
       let docSpecCount = 0;

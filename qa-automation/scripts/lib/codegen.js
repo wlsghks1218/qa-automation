@@ -11,6 +11,7 @@ function locatorCode(spec) {
     label: () => `page.getByLabel(${name}, { exact: true })`,
     placeholder: () => `page.getByPlaceholder(${name}, { exact: true })`,
     css: () => `page.locator(${JSON.stringify(spec.selector)})`,
+    text: () => `page.locator(${JSON.stringify(spec.tag)}).filter({ hasText: ${name} })`,
   }[spec.kind]();
   return `${base}.nth(${spec.nth})`;
 }
@@ -28,7 +29,7 @@ function specHeader({ describeTitle, env, supportPath, generator }) {
   return [
     `// 자동 생성 파일 - ${generator} 로 재생성됩니다. 직접 수정하지 마세요.`,
     `import { test, expect } from '@playwright/test';`,
-    `import { openPage, expectNoBrokenImages } from '${supportPath}';`,
+    `import { openPage, expectNoBrokenImages, checks, expectShownInRotation } from '${supportPath}';`,
     ``,
     `test.describe(${JSON.stringify(describeTitle)}, () => {`,
     `  test.skip(({ isMobile }) => isMobile, '데스크톱(${env.viewport.width}x${env.viewport.height}) 기준으로 분석된 시나리오입니다.');`,

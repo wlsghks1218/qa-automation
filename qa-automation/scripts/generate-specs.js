@@ -2,6 +2,7 @@ const { chromium } = require('@playwright/test');
 const fs = require('fs');
 const path = require('path');
 const { short, locatorCode, urlMatcher, specHeader } = require('./lib/codegen');
+const { findTypos } = require('./lib/typo');
 
 // 사용법: node scripts/generate-specs.js <URL> [--scope=all|single]
 //   --scope=all    : 입력한 URL + 연결된 세부 페이지 모두 분석 (기본값)
@@ -20,6 +21,8 @@ const CONCURRENCY = Number(process.env.CRAWL_CONCURRENCY || 3);
 const MAX_FEATURES_PER_PAGE = Number(process.env.MAX_FEATURES_PER_PAGE || 25);
 // 헤더/내비/푸터 공통 요소 탐지 상한 (문서 사이트처럼 메뉴 링크가 수백 개인 경우 대비)
 const MAX_COMMON_FEATURES = Number(process.env.MAX_COMMON_FEATURES || 20);
+// 클릭 요소 밖의 일반 문구 수집 상한 (약관처럼 문단이 수백 개인 페이지 대비)
+const MAX_TEXTS_PER_PAGE = Number(process.env.MAX_TEXTS_PER_PAGE || 200);
 const CRAWL_DEPTH = Number(process.env.CRAWL_DEPTH || 1);
 const MAX_PAGES = Number(process.env.MAX_PAGES || 30);
 const VIEWPORT = { width: 1440, height: 900 };
@@ -223,6 +226,15 @@ async function collectCandidates(page) {
   return page.evaluate((selector) => {
     const all = Array.from(document.querySelectorAll(selector));
     const out = [];
+    // 화면 순서용 좌표: 화면에 고정된 상단 바는 맨 앞, 하단 탭 메뉴는 맨 뒤로 보낸다
+    const posOf = (el) => {
+      const r = el.getBoundingClientRect();
+      const x = Math.round(r.left + scrollX);
+      for (let a = el; a && a !== document.body; a = a.parentElement) {
+        if (getComputedStyle(a).position === 'fixed') return { y: r.top < innerHeight / 2 ? Math.round(r.top) : 1e7 + Math.round(r.top), x };
+      }
+      return { y: Math.round(r.top + scrollY), x };
+    };
     all.forEach((el, idx) => {
       // 중첩된 인터랙티브 요소는 바깥 요소 하나만 사용
       if (el.parentElement && el.parentElement.closest(selector)) return;
@@ -264,6 +276,11 @@ async function collectCandidates(page) {
       out.push({
         idx,
         tag,
+        // 화면 위→아래 순서 정렬용 (문서 기준 좌표)
+        pos: posOf(el),
+        area: Math.round(r.width * r.height),
+        lines: tag === 'input' || tag === 'textarea' || tag === 'select' ? [] : (el.innerText || '').split('\n').map(clean).filter(Boolean).slice(0, 6),
+        hasImg: tag === 'img' || !!el.querySelector('img, svg, [role="img"]'),
         type: el.getAttribute('type') || '',
         href,
         target: el.getAttribute('target'),
@@ -320,6 +337,12 @@ async function resolveLocator(page, cand) {
     if (spec) return spec;
   }
 
+  // 접근성 이름이 안 잡히는 요소(<summary> 펼치기 등): 태그 + 화면 문구로 식별
+  if (cand.lines.length) {
+    const spec = await tryLocator({ kind: 'text', tag: cand.tag, role: role || cand.tag, name: cand.lines[0] });
+    if (spec) return spec;
+  }
+
   // 이름 없는 아이콘 버튼 등: 페이지 내에서 유일한 속성으로 식별 (테스트 ID 우선)
   const attrSelector = await el
     .evaluate((node) => {
@@ -351,6 +374,7 @@ function buildLocator(page, spec) {
     label: () => page.getByLabel(spec.name, { exact: true }),
     placeholder: () => page.getByPlaceholder(spec.name, { exact: true }),
     css: () => page.locator(spec.selector),
+    text: () => page.locator(spec.tag).filter({ hasText: spec.name }),
   }[spec.kind]();
   return spec.nth === undefined ? base : base.nth(spec.nth);
 }
@@ -358,6 +382,31 @@ function buildLocator(page, spec) {
 /** 요소를 실제로 클릭해보고 어떤 동작이 일어나는지 관찰 */
 async function probe(page, spec, noisy) {
   const loc = buildLocator(page, spec);
+
+  // 마우스 오버로 새로 나타나는 문구(툴팁/말풍선/호버 메뉴)
+  let tooltip = null;
+  if (!['textbox', 'searchbox', 'spinbutton', 'combobox'].includes(spec.role)) {
+    const idle = await pageState(page);
+    if (await loc.hover({ timeout: 3000 }).then(() => true).catch(() => false)) {
+      await page.waitForTimeout(600);
+      const role = await page.getByRole('tooltip').filter({ visible: true }).first().innerText({ timeout: 300 }).catch(() => '');
+      const idleLines = new Set(idle.lines);
+      const hovered = await pageState(page);
+      tooltip =
+        role.split('\n').map((t) => t.trim().replace(/\s+/g, ' ')).find(Boolean) ||
+        hovered.lines.find((t) => !idleLines.has(t) && !noisy.has(t) && isAssertableText(t)) ||
+        null;
+      if (tooltip && !isAssertableText(tooltip)) tooltip = null;
+      await page.mouse.move(0, 0);
+      await page.waitForTimeout(300);
+    }
+  }
+  const withTip = (effect) => (tooltip ? { ...effect, tooltip } : effect);
+  const effect = await probeClick(page, loc, spec, noisy);
+  return withTip(effect);
+}
+
+async function probeClick(page, loc, spec, noisy) {
   const before = await pageState(page);
   const expandedBefore = await loc.getAttribute('aria-expanded', { timeout: 1000 }).catch(() => null);
 
@@ -451,13 +500,158 @@ async function isFindableText(page, text) {
   return (await page.getByText(text, { exact: true }).filter({ visible: true }).count().catch(() => 0)) > 0;
 }
 
+/**
+ * 클릭 요소 밖의 일반 문구와 이미지를 화면 순서대로 수집.
+ * 문구는 줄바꿈 없는 한 덩어리(문단/제목/라벨) 단위로 모은다.
+ */
+async function collectScreenItems(page) {
+  return page.evaluate((selector) => {
+    const clean = (t) => (t || '').trim().replace(/\s+/g, ' ');
+    const zoneOf = (el) => (el.closest('header, nav, footer, [role="banner"], [role="navigation"], [role="contentinfo"]') ? 'common' : 'main');
+    // 화면 순서용 좌표 (collectCandidates 와 동일): 고정 상단 바는 맨 앞, 고정 하단 메뉴는 맨 뒤
+    const posOf = (el) => {
+      const r = el.getBoundingClientRect();
+      const x = Math.round(r.left + scrollX);
+      for (let a = el; a && a !== document.body; a = a.parentElement) {
+        if (getComputedStyle(a).position === 'fixed') return { y: r.top < innerHeight / 2 ? Math.round(r.top) : 1e7 + Math.round(r.top), x };
+      }
+      return { y: Math.round(r.top + scrollY), x };
+    };
+    const shown = (el) => {
+      const r = el.getBoundingClientRect();
+      const s = getComputedStyle(el);
+      return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+    };
+    const texts = [];
+    const images = [];
+    const taken = new Set();
+    for (const el of document.body.querySelectorAll('*')) {
+      if (/^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|OPTION)$/.test(el.tagName)) continue;
+      // 클릭 요소 안의 문구/이미지는 그 요소의 '문구' 검사에서 확인한다
+      if (el.closest(selector)) continue;
+      // 닫힌 모달·숨김 영역은 클릭 탐지(모달 노출)에서 다룬다
+      if (el.closest('[aria-hidden="true"], [role="dialog"], dialog, [role="tooltip"]')) continue;
+      if (el.matches('img, [role="img"]')) {
+        const name = clean(el.getAttribute('alt') || el.getAttribute('aria-label'));
+        if (name && shown(el)) images.push({ name, pos: posOf(el), zone: zoneOf(el) });
+        continue;
+      }
+      if (el.closest('svg')) continue;
+      const own = Array.from(el.childNodes).some((n) => n.nodeType === 3 && n.textContent.trim());
+      if (!own || !shown(el)) continue;
+      let anc = el.parentElement;
+      while (anc && !taken.has(anc)) anc = anc.parentElement;
+      if (anc) continue;
+      const raw = el.innerText || '';
+      // 블록 자식이 섞인 요소는 한 문구로 찾을 수 없으므로 자식 단위로 수집되게 둔다
+      if (raw.trim().includes('\n')) continue;
+      taken.add(el);
+      texts.push({ text: clean(raw), pos: posOf(el), zone: zoneOf(el) });
+    }
+    return { texts, images };
+  }, INTERACTIVE_SELECTOR);
+}
+
+/**
+ * 롤링 배너/슬라이드 탐지: 일정 시간 동안 여러 번 관찰해서
+ * DOM 에는 계속 있는데 화면에 보였다 안 보였다 하는 문구를 같은 슬라이드 영역끼리 묶는다.
+ */
+async function detectRolling(page, samples = 9, interval = 700) {
+  const snap = () =>
+    page.evaluate(() => {
+      const clean = (t) => (t || '').trim().replace(/\s+/g, ' ');
+      let clipSeq = Number(document.body.dataset.qaClipSeq || 0);
+      const out = [];
+      for (const el of document.body.querySelectorAll('*')) {
+        if (/^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE)$/.test(el.tagName)) continue;
+        if (!Array.from(el.childNodes).some((n) => n.nodeType === 3 && n.textContent.trim())) continue;
+        const text = clean(el.innerText);
+        if (!text || text.length > 200 || text.includes('\n')) continue;
+        const r = el.getBoundingClientRect();
+        let visible = r.width > 0 && r.height > 0 && r.right > 0 && r.left < innerWidth;
+        let clip = null;
+        let clipY = null;
+        for (let a = el; a && a !== document.body; a = a.parentElement) {
+          const s = getComputedStyle(a);
+          if (s.visibility === 'hidden' || s.display === 'none' || Number(s.opacity) < 0.1) visible = false;
+          if (a !== el && (s.overflowX !== 'visible' || s.overflowY !== 'visible')) {
+            const ar = a.getBoundingClientRect();
+            if (r.right <= ar.left + 2 || r.left >= ar.right - 2 || r.bottom <= ar.top + 2 || r.top >= ar.bottom - 2) {
+              visible = false;
+              // 실제로 문구를 가린 영역 = 슬라이드 창. 같은 창에 가려지는 문구끼리 한 롤링으로 묶는다
+              if (!clip) {
+                if (!a.dataset.qaClip) a.dataset.qaClip = String(++clipSeq);
+                clip = a.dataset.qaClip;
+                clipY = Math.round(ar.top + scrollY);
+              }
+            }
+          }
+        }
+        out.push({ text, visible, clip, y: clipY ?? Math.round(r.top + scrollY) });
+      }
+      document.body.dataset.qaClipSeq = String(clipSeq);
+      return out;
+    });
+
+  const history = new Map(); // text → { shown, seen, clip, y }
+  for (let i = 0; i < samples; i++) {
+    for (const { text, visible, clip, y } of await snap()) {
+      const h = history.get(text) || { shown: 0, seen: 0, clip: null, y, hits: new Set() };
+      if (clip && !h.clip) {
+        h.clip = clip;
+        h.y = y; // 슬라이드 창(가리는 영역)의 위치로 정렬
+      }
+      if (!h.hits.has(i)) {
+        h.hits.add(i);
+        h.seen++;
+        if (visible) h.shown++;
+      } else if (visible && h.shown < h.seen) {
+        h.shown++; // 같은 문구가 복제 슬라이드에 여러 번 있는 경우: 하나라도 보이면 보임
+      }
+      history.set(text, h);
+    }
+    if (i < samples - 1) await page.waitForTimeout(interval);
+  }
+
+  const groups = new Map();
+  for (const [text, h] of history) {
+    if (h.seen !== samples || h.shown === 0 || h.shown === samples || !h.clip) continue;
+    if (!isAssertableText(text)) continue;
+    if (!groups.has(h.clip)) groups.set(h.clip, { texts: [], y: h.y });
+    const g = groups.get(h.clip);
+    g.texts.push(text);
+    g.y = Math.min(g.y, h.y);
+  }
+  // 보였다 안 보였다 하는 문구가 2개 이상이어야 롤링으로 본다 (깜빡임 하나는 제외)
+  return [...groups.values()].filter((g) => g.texts.length >= 2).map((g) => ({ texts: g.texts.slice(0, 10), pos: { y: g.y, x: 0 } }));
+}
+
+// 진행 로그용: 요소 종류 이름
+const ROLE_LABEL = { link: '링크', button: '버튼', tab: '탭', menuitem: '메뉴', combobox: '선택 박스', checkbox: '체크박스', radio: '라디오', switch: '스위치', textbox: '입력창', searchbox: '검색창' };
+function kindOf(cand, spec) {
+  if (cand.tag === 'summary') return '펼치기';
+  const base = ROLE_LABEL[spec.role] || cand.tag;
+  if (cand.hasImg && !cand.lines.length) {
+    // 헤더 왼쪽 위의 이미지 링크는 대부분 로고
+    if (cand.zone === 'common' && cand.pos.y < 200 && cand.pos.x < 400) return '로고';
+    return `이미지 ${base}`;
+  }
+  // 넓은 영역에 여러 줄 문구/이미지를 담은 클릭 요소는 배너(카드)로 본다
+  if (['a', 'button'].includes(cand.tag) || ['link', 'button'].includes(spec.role)) {
+    if (cand.area >= 300 * 100 && (cand.lines.length >= 2 || cand.hasImg)) return '배너';
+  }
+  return base;
+}
+
 async function analyzePage(context, pagePath, { commonSignatures, collectCommon }) {
+  const tag = pagePath;
+  const step = (msg) => console.log(`   · [${tag}] ${msg}`);
   const url = `${BASE_URL}${pagePath}`;
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
 
-  const result = { path: pagePath, url, title: '', status: 0, keyTexts: [], tables: [], pageType: 'general', features: [], common: [], skipped: [], errors };
+  const result = { path: pagePath, url, title: '', status: 0, keyTexts: [], texts: [], images: [], rolling: [], tables: [], pageType: 'general', features: [], common: [], skipped: [], errors };
 
   try {
     const response = await openForAnalysis(page, url);
@@ -469,7 +663,7 @@ async function analyzePage(context, pagePath, { commonSignatures, collectCommon 
     if (result.status >= 400 || BOT_CHECK.test(`${result.title}\n${bodyText}`)) {
       result.blocked = result.status >= 400 ? `HTTP ${result.status}` : '봇 차단/보안 확인 페이지';
       result.pageType = 'blocked';
-      console.warn(`   [접속 차단] ${url} - ${result.blocked}. 이 페이지는 기능 분석을 건너뜁니다.`);
+      console.warn(`   · [${tag}] 접속 차단 (${result.blocked}) → 이 페이지는 접속 상태만 검증합니다.`);
       return result;
     }
 
@@ -534,6 +728,8 @@ async function analyzePage(context, pagePath, { commonSignatures, collectCommon 
       if (await isFindableText(page, t)) result.keyTexts.push(t);
     }
 
+    step(`화면 열기 HTTP ${result.status} · 유형 ${PAGE_TYPE_LABEL[result.pageType]} · 핵심 문구 ${result.keyTexts.length}개${result.tables.length ? ` · 표 ${result.tables.length}개` : ''}`);
+
     // 인터랙티브 요소 수집 및 로케이터 확정 (프로브 전에 모두 확정해야 reload 후에도 재사용 가능)
     const candidates = await collectCandidates(page);
     const resolved = [];
@@ -544,59 +740,104 @@ async function analyzePage(context, pagePath, { commonSignatures, collectCommon 
         continue;
       }
       if (isPopupControl(spec.name)) continue;
-      if (RISKY.test(spec.name) || cand.type === 'submit') {
-        result.skipped.push({ reason: '부작용 위험 요소', name: spec.name });
-        continue;
-      }
       const signature = `${spec.role}|${spec.name}|${cand.href || ''}`;
       const isCommon = cand.zone === 'common';
       if (isCommon && !collectCommon) continue;
       if (!isCommon && commonSignatures.has(signature)) continue;
-      resolved.push({ cand, spec, signature, bucket: isCommon ? 'common' : 'features' });
+      // 부작용 위험 요소(삭제/결제/제출 등)도 노출·문구는 확인하고 클릭만 하지 않는다
+      const risky = RISKY.test(spec.name) || cand.type === 'submit';
+      resolved.push({ cand, spec, signature, risky, bucket: isCommon ? 'common' : 'features' });
     }
+
+    // 클릭 요소 밖의 일반 문구·이미지, 롤링 배너 (클릭 탐지 전에 원래 화면 상태에서 수집)
+    const rolling = await detectRolling(page);
+    const rollingTexts = new Set(rolling.flatMap((g) => g.texts));
+    // 롤링 문구는 저절로 바뀌므로 클릭/마우스 오버 결과(툴팁·콘텐츠 노출) 판단에서 제외
+    rollingTexts.forEach((t) => noisy.add(t));
+    const screen = await collectScreenItems(page);
+    const keepZone = (z) => collectCommon || z === 'main';
+    const seenText = new Set();
+    for (const t of screen.texts) {
+      if (result.texts.length >= MAX_TEXTS_PER_PAGE) break;
+      if (!keepZone(t.zone) || seenText.has(t.text) || noisy.has(t.text) || rollingTexts.has(t.text)) continue;
+      if (t.text.length < 2 || t.text.length > 200 || /^[\d\s.,:%+\-$₩()/]+$/.test(t.text)) continue;
+      seenText.add(t.text);
+      if (await isFindableText(page, t.text)) result.texts.push(t);
+    }
+    result.images = screen.images.filter((i) => keepZone(i.zone));
+    result.rolling = rolling;
+    step(`일반 문구 ${result.texts.length}개 · 이미지 ${result.images.length}개${rolling.length ? ` · 롤링 배너 ${rolling.length}개 (문구 ${rollingTexts.size}개)` : ''} 수집`);
 
     // 페이지당 탐지 개수 제한이 있으므로 상호작용 컴포넌트(버튼/토글/탭)를 링크보다 먼저 탐지한다
     const priority = ({ cand, spec }) => (cand.tag === 'a' || spec.role === 'link' ? 1 : 0);
     resolved.sort((a, b) => priority(a) - priority(b));
 
+    const counts = { common: 0, features: 0 };
+    for (const r of resolved) counts[r.bucket]++;
+    step(`클릭·입력 가능한 요소 ${resolved.length}개 발견${collectCommon ? ` (헤더/메뉴/푸터 공통 ${counts.common}개 + 본문 ${counts.features}개)` : ''} → 하나씩 동작 확인`);
+
     const probedBy = { features: 0, common: 0 };
-    for (const { cand, spec, signature, bucket } of resolved) {
+    let n = 0;
+    for (const { cand, spec, signature, bucket, risky } of resolved) {
+      n++;
       const label = spec.name || cand.href || spec.selector || spec.role;
-      const base = { label, signature, locator: spec, href: cand.href };
+      const lines = cand.lines.filter((t) => !noisy.has(t));
+      const base = { label, signature, locator: spec, href: cand.href, kind: kindOf(cand, spec), lines, hasImg: cand.hasImg, pos: cand.pos };
+      const before = result[bucket].length;
+      const where = collectCommon && bucket === 'common' ? '공통 ' : '';
+      const report = (how) => {
+        const added = result[bucket].length > before ? result[bucket][result[bucket].length - 1] : null;
+        step(`(${n}/${resolved.length}) ${where}${kindOf(cand, spec)} "${short(String(label), 25)}" ${how} → ${added ? TYPE_LABEL[added.type] : '제외'}`);
+      };
 
       // 클릭 없이 구조만으로 판별되는 패턴
       if (cand.anchorId) {
         // 목차 앵커는 페이지당 10개까지만 (문서 사이트는 수십 개라 테스트가 과도하게 늘어남)
         if (result[bucket].filter((x) => x.type === 'anchor').length < 10) {
           result[bucket].push({ ...base, type: 'anchor', anchorId: cand.anchorId });
+        } else {
+          result[bucket].push({ ...base, type: 'display', reason: '목차 링크 이동 확인은 페이지당 10개까지' });
         }
+        report('구조 확인');
         continue;
       }
       if (cand.tag === 'select') {
         if (cand.option) result[bucket].push({ ...base, type: 'select', value: cand.option });
+        report('옵션 확인');
         continue;
       }
       if (['textbox', 'searchbox', 'spinbutton'].includes(spec.role) || cand.tag === 'textarea') {
         result[bucket].push({ ...base, type: 'input', inputType: cand.type || 'text', formButton: cand.formButton });
+        report('입력 확인');
         continue;
       }
       if (['checkbox', 'radio', 'switch'].includes(spec.role)) {
         result[bucket].push({ ...base, type: 'check' });
+        report('선택 확인');
+        continue;
+      }
+      if (risky) {
+        result[bucket].push({ ...base, type: 'display', reason: '부작용 위험(삭제/결제/제출 등)으로 클릭하지 않음' });
+        report('클릭 생략(부작용 위험)');
         continue;
       }
       const limit = bucket === 'features' ? MAX_FEATURES_PER_PAGE : MAX_COMMON_FEATURES;
       if (probedBy[bucket] >= limit) {
-        result.skipped.push({ reason: `${bucket === 'features' ? '페이지' : '공통 영역'}당 최대 ${limit}개 초과`, name: label });
+        // 목록에서 빼지 않고 노출·문구만 확인한다
+        result[bucket].push({ ...base, type: 'display', reason: `클릭 확인 상한(${limit}개) 초과` });
+        report(`클릭 상한 ${limit}개 초과로 클릭 생략`);
         continue;
       }
       probedBy[bucket]++;
 
       const effect = await probe(page, spec, noisy);
       if (effect.type === 'unclickable') {
-        result.skipped.push({ reason: `클릭 불가: ${effect.reason}`, name: label });
+        // 클릭은 안 되더라도 화면에 있는 요소이므로 노출·문구는 확인한다
+        result[bucket].push({ ...base, type: 'display', reason: `분석 중 클릭 불가: ${short(effect.reason, 60)}`, ...(effect.tooltip ? { tooltip: effect.tooltip } : {}) });
       } else {
         result[bucket].push({ ...base, ...effect });
       }
+      report(`${effect.tooltip ? `마우스 오버 "${short(effect.tooltip, 15)}" · ` : ''}${effect.type === 'unclickable' ? `클릭 불가(${short(effect.reason, 40)})` : '클릭'}`);
 
       if (effect.dirty) {
         await openForAnalysis(page, url).catch(() => {});
@@ -627,15 +868,16 @@ const TYPE_LABEL = {
   brokenLink: '깨진 링크',
   select: '선택 박스',
   anchor: '목차/앵커 이동',
+  display: '노출·문구만 확인',
 };
 
 const SAMPLE_INPUT = { email: 'qa@example.com', number: '123', tel: '01012345678', url: 'https://example.com' };
 
-function featureTest(f, id) {
-  const title = `${id} [${TYPE_LABEL[f.type]}] ${JSON.stringify(short(f.label)).slice(1, -1)}`;
-  const loc = locatorCode(f.locator);
+/** 요소의 '동작' 검사 코드: { action: 결과 화면에 표시할 설명, body: 코드 줄 } */
+function actionCode(f) {
   // 줄바꿈(<br>)으로 나뉜 문구의 한 줄일 수 있으므로 부분 일치로 찾는다
   const textLoc = (t) => `page.getByText(${JSON.stringify(t)}).filter({ visible: true }).first()`;
+  const q = (t, n = 20) => JSON.stringify(short(t, n)).slice(1, -1);
   const body = [];
 
   switch (f.type) {
@@ -645,22 +887,21 @@ function featureTest(f, id) {
       const external = u.origin !== BASE_URL;
       body.push(`await target.click();`);
       body.push(`await expect(page).toHaveURL(${urlMatcher(f.url, external)});`);
-      return { title: `${title} → ${external ? u.host : u.pathname}`, body };
+      return { action: `페이지 이동 → ${external ? u.host : u.pathname}`, body };
     }
     case 'brokenLink':
       // 분석 시 연결에 실패한 링크: 정상 페이지로 열리는지 검증 (지금 상태면 실패로 보고됨)
       body.push(`await target.click();`);
       body.push(`await page.waitForLoadState('domcontentloaded');`);
       body.push(`expect(page.url(), '링크 이동 시 브라우저 오류 페이지가 열립니다 (연결 실패 또는 차단).').not.toMatch(/^chrome-error:/);`);
-      return { title: `${title} → 연결 실패 링크`, body };
+      return { action: '링크 연결 (분석 시 연결 실패)', body };
     case 'newTab': {
-      const host = new URL(f.url).host;
       body.push(`const popupPromise = page.waitForEvent('popup');`);
       body.push(`await target.click();`);
       body.push(`const popup = await popupPromise;`);
       body.push(`await expect(popup).toHaveURL(${urlMatcher(f.url, true)});`);
       body.push(`await popup.close();`);
-      return { title: `${title} → ${host}`, body };
+      return { action: `새 탭 열기 → ${new URL(f.url).host}`, body };
     }
     case 'modal':
     case 'reveal':
@@ -674,10 +915,7 @@ function featureTest(f, id) {
         body.push(`await page.keyboard.press(${JSON.stringify(f.closeKey)});`);
         body.push(`await expect(${textLoc(f.text)}).toBeHidden();`);
       }
-      return {
-        title: `${title} → "${JSON.stringify(short(f.text, 20)).slice(1, -1)}"${f.closeName || f.closeKey ? ' 노출 후 닫힘' : ''}`,
-        body,
-      };
+      return { action: `${TYPE_LABEL[f.type]} "${q(f.text)}"${f.closeName || f.closeKey ? ' 후 닫힘' : ''}`, body };
     case 'toggle':
       body.push(`await target.click();`);
       body.push(`await expect(target).toHaveAttribute('aria-expanded', ${JSON.stringify(f.expanded)});`);
@@ -685,98 +923,194 @@ function featureTest(f, id) {
         body.push(`await target.click();`);
         body.push(`await expect(target).toHaveAttribute('aria-expanded', ${JSON.stringify(f.collapsed)});`);
       }
-      return { title: `${title}${f.collapsed ? ' (펼침 → 접힘)' : ''}`, body };
+      return { action: `펼침${f.collapsed ? ' → 접힘' : ''}`, body };
     case 'select':
       body.push(`await target.selectOption(${JSON.stringify(f.value)});`);
       body.push(`await expect(target).toHaveValue(${JSON.stringify(f.value)});`);
-      return { title, body };
+      return { action: `옵션 선택 "${q(f.value)}"`, body };
     case 'anchor':
       body.push(`await target.click();`);
       body.push(`await expect(page.locator(${JSON.stringify(`[id="${f.anchorId}"]`)})).toBeInViewport();`);
-      return { title: `${title} → #${f.anchorId}`, body };
+      return { action: `목차 이동 → #${f.anchorId}`, body };
     case 'tab':
       body.push(`await target.click();`);
       body.push(`await expect(target).toHaveAttribute('aria-selected', 'true');`);
-      return { title, body };
+      return { action: '탭 전환', body };
     case 'input': {
       const value = SAMPLE_INPUT[f.inputType] || 'qa-test';
       body.push(`await target.fill(${JSON.stringify(value)});`);
       body.push(`await expect(target).toHaveValue(${JSON.stringify(value)});`);
       // 같은 폼의 제출 버튼이 입력 후 활성화되는지 (실제 제출은 하지 않음)
       if (f.formButton) body.push(`await expect(page.getByRole('button', { name: ${JSON.stringify(f.formButton)}, exact: true }).first()).toBeEnabled();`);
-      return { title, body };
+      return { action: `입력${f.formButton ? ` → "${q(f.formButton)}" 버튼 활성화` : ''}`, body };
     }
     case 'check':
       body.push(`await target.check();`);
       body.push(`await expect(target).toBeChecked();`);
-      return { title, body };
+      return { action: '선택(체크)', body };
     default:
       body.push(`await expect(target).toBeEnabled();`);
       body.push(`await target.click();`);
       body.push(`await page.waitForTimeout(800);`);
       body.push(`expect(errors, '클릭 후 JS 런타임 오류').toEqual([]);`);
-      return { title, body };
+      return { action: '클릭 시 오류 없음', body };
   }
 }
 
-function specSource({ describeTitle, url, page, features, includeContent }) {
+const num = (n) => String(n).padStart(2, '0');
+const q = (t, n = 30) => JSON.stringify(short(t, n)).slice(1, -1);
+
+/** 클릭 요소 하나: 노출 → 문구 → (이미지) → (마우스 오버) → 동작 */
+function elementTest(f, no, typos) {
+  const out = [];
+  // 제목은 화면에 보이는 문구 우선 (이미지 대체텍스트가 섞인 접근성 이름보다 알아보기 쉽다)
+  const shownName = f.lines && f.lines.length ? f.lines.join(' ') : f.label;
+  out.push(`  test(${JSON.stringify(`${num(no)}. ${f.kind} "${q(shownName)}" (${f.id})`)}, async ({ page }) => {`);
+  out.push(`    const { errors } = await openPage(page, TARGET_URL);`);
+  out.push(`    const target = ${locatorCode(f.locator)};`);
+  out.push(`    const c = checks();`);
+  out.push(`    await c.run('노출', async () => { await expect(target).toBeVisible(); }, { gate: true });`);
+  // 요소 안 문구는 줄마다 따로 확인 (버튼 문구 / 말풍선 문구 / 배너 제목·설명이 각각 결과로 보이도록)
+  for (const l of f.lines || []) {
+    out.push(`    await c.run(${JSON.stringify(`문구: "${q(l, 40)}"`)}, async () => { await expect(target).toContainText(${JSON.stringify(l)}); });`);
+    if (typos.has(l)) out.push(`    c.warn(${JSON.stringify(l)}, ${JSON.stringify(typos.get(l))});`);
+  }
+  if (f.hasImg) {
+    out.push(`    await c.run('이미지 로드', async () => {`);
+    out.push(`      const broken = await target.locator('img').evaluateAll((els) => els.filter((i) => (i as HTMLImageElement).complete && (i as HTMLImageElement).naturalWidth === 0).length);`);
+    out.push(`      expect(broken, '요소 안 이미지가 깨짐').toBe(0);`);
+    out.push(`    });`);
+  }
+  if (f.tooltip) {
+    out.push(`    await c.run(${JSON.stringify(`마우스 오버: "${q(f.tooltip, 25)}" 노출`)}, async () => {`);
+    out.push(`      await target.hover();`);
+    out.push(`      await expect(page.getByText(${JSON.stringify(f.tooltip)}).filter({ visible: true }).first()).toBeVisible();`);
+    out.push(`      await page.mouse.move(0, 0);`);
+    out.push(`    });`);
+    if (typos.has(f.tooltip)) out.push(`    c.warn(${JSON.stringify(f.tooltip)}, ${JSON.stringify(typos.get(f.tooltip))});`);
+  }
+  if (f.type === 'display') {
+    out.push(`    c.skip('동작', ${JSON.stringify(f.reason || '클릭 확인 생략')});`);
+  } else {
+    const { action, body } = actionCode(f);
+    out.push(`    await c.run(${JSON.stringify(`동작: ${action}`)}, async () => {`);
+    body.forEach((l) => out.push(`      ${l}`));
+    out.push(`    });`);
+  }
+  out.push(`    void errors;`);
+  out.push(`    c.done();`);
+  out.push(`  });`);
+  return out;
+}
+
+/** 클릭 요소 사이에 있는 일반 문구·이미지 묶음 */
+function contentTest(items, no, typos) {
+  const first = items[0];
+  const imageKind = (name) => (/logo|로고/i.test(name) ? '로고' : '이미지');
+  const label = first.kind === 'text' ? `문구 "${q(first.text)}"` : `${imageKind(first.name)} "${q(first.name)}"`;
+  const out = [];
+  out.push(`  test(${JSON.stringify(`${num(no)}. ${label}${items.length > 1 ? ` 외 ${items.length - 1}개` : ''}`)}, async ({ page }) => {`);
+  out.push(`    await openPage(page, TARGET_URL);`);
+  out.push(`    const c = checks();`);
+  for (const it of items) {
+    if (it.kind === 'text') {
+      out.push(`    await c.run(${JSON.stringify(`문구 노출: "${q(it.text, 40)}"`)}, async () => {`);
+      out.push(`      await expect(page.getByText(${JSON.stringify(it.text)}, { exact: true }).filter({ visible: true }).first()).toBeVisible();`);
+      out.push(`    });`);
+      if (typos.has(it.text)) out.push(`    c.warn(${JSON.stringify(it.text)}, ${JSON.stringify(typos.get(it.text))});`);
+    } else {
+      out.push(`    await c.run(${JSON.stringify(`${imageKind(it.name)} 노출: "${q(it.name, 30)}"`)}, async () => {`);
+      out.push(`      const img = page.getByRole('img', { name: ${JSON.stringify(it.name)}, exact: true }).filter({ visible: true }).first();`);
+      out.push(`      await expect(img).toBeVisible();`);
+      out.push(`      expect(await img.evaluate((i) => !(i instanceof HTMLImageElement) || i.naturalWidth > 0), '이미지가 깨짐').toBe(true);`);
+      out.push(`    });`);
+    }
+  }
+  out.push(`    c.done();`);
+  out.push(`  });`);
+  return out;
+}
+
+/** 롤링 배너: 슬라이드 문구가 차례로 화면에 나타나는지 */
+function rollingTest(g, no, typos) {
+  const out = [];
+  out.push(`  test(${JSON.stringify(`${num(no)}. 롤링 배너 "${q(g.texts[0], 20)}" 외 ${g.texts.length - 1}개 문구`)}, async ({ page }) => {`);
+  out.push(`    test.setTimeout(${30000 + g.texts.length * 20000});`);
+  out.push(`    await openPage(page, TARGET_URL);`);
+  out.push(`    await page.getByText(${JSON.stringify(g.texts[0])}, { exact: true }).first().evaluate((el) => window.scrollTo(0, el.getBoundingClientRect().top + window.scrollY - 200));`);
+  out.push(`    const c = checks();`);
+  for (const t of g.texts) {
+    out.push(`    await c.run(${JSON.stringify(`롤링 문구 노출: "${q(t, 40)}"`)}, () => expectShownInRotation(page, ${JSON.stringify(t)}));`);
+    if (typos.has(t)) out.push(`    c.warn(${JSON.stringify(t)}, ${JSON.stringify(typos.get(t))});`);
+  }
+  out.push(`    c.done();`);
+  out.push(`  });`);
+  return out;
+}
+
+/**
+ * 페이지 하나의 spec: 화면 위→아래 순서로
+ * 클릭 요소(노출·문구·동작) / 일반 문구·이미지 묶음 / 롤링 배너 케이스를 나열한다.
+ */
+function specSource({ describeTitle, page, features, typos }) {
   const out = specHeader({ describeTitle, env: ENV, supportPath: '../support/site', generator: 'scripts/generate-specs.js' });
   out.push(``);
-  out.push(`  const TARGET_URL = ${JSON.stringify(url)};`);
+  out.push(`  const TARGET_URL = ${JSON.stringify(page.url)};`);
 
-  if (includeContent) {
-    out.push(``);
-    out.push(`  test('C-01 [콘텐츠] 페이지 로드 및 핵심 콘텐츠 노출', async ({ page }) => {`);
-    out.push(`    const { response, errors } = await openPage(page, TARGET_URL);`);
-    out.push(``);
-    out.push(`    await test.step('HTTP 응답 정상', async () => {`);
-    out.push(`      expect(response?.status() ?? 0).toBeLessThan(400);`);
-    out.push(`    });`);
-    if (page.blocked) {
-      // 분석 시 접속이 차단된 페이지: 차단이 풀렸는지만 확인하고 나머지는 생략
-      out.push(``);
-      out.push(`    await test.step('봇 차단/보안 확인 페이지가 아님', async () => {`);
-      out.push(`      await expect(page.getByText(${BOT_CHECK.toString()}).first(), ${JSON.stringify(`분석 시 접속 차단됨 (${page.blocked}). 사이트가 자동화 접근을 막고 있습니다.`)}).toHaveCount(0);`);
-      out.push(`    });`);
-      out.push(`  });`);
-      return [...out, `});`, ``].join('\n');
-    }
-    for (const t of page.keyTexts) {
-      out.push(``);
-      out.push(`    await test.step(${JSON.stringify(`핵심 텍스트 노출: ${short(t)}`)}, async () => {`);
-      out.push(`      await expect(page.getByText(${JSON.stringify(t)}, { exact: true }).filter({ visible: true }).first()).toBeVisible();`);
-      out.push(`    });`);
-    }
-    out.push(``);
-    for (const t of page.tables || []) {
-      out.push(``);
-      out.push(`    await test.step(${JSON.stringify(`표 구조: ${t.nth + 1}번째 표 (컬럼 ${t.columns}개, 데이터 행 있음)`)}, async () => {`);
-      out.push(`      const table = page.getByRole('table').nth(${t.nth});`);
-      if (t.columns) out.push(`      await expect(table.getByRole('columnheader')).toHaveCount(${t.columns});`);
-      out.push(`      expect(await table.getByRole('row').count()).toBeGreaterThan(${t.columns ? 1 : 0});`);
-      out.push(`    });`);
-    }
-    out.push(``);
-    out.push(`    await test.step('이미지 정상 로드', async () => {`);
-    out.push(`      await expectNoBrokenImages(page);`);
-    out.push(`    });`);
-    out.push(``);
-    out.push(`    await test.step('JS 런타임 오류 없음', async () => {`);
-    out.push(`      expect.soft(errors).toEqual([]);`);
+  out.push(``);
+  out.push(`  test('00. 페이지 로드 (HTTP 상태 · 이미지 · JS 오류)', async ({ page }) => {`);
+  out.push(`    const { response, errors } = await openPage(page, TARGET_URL);`);
+  out.push(`    await test.step('HTTP 응답 정상', async () => {`);
+  out.push(`      expect(response?.status() ?? 0).toBeLessThan(400);`);
+  out.push(`    });`);
+  if (page.blocked) {
+    // 분석 시 접속이 차단된 페이지: 차단이 풀렸는지만 확인하고 나머지는 생략
+    out.push(`    await test.step('봇 차단/보안 확인 페이지가 아님', async () => {`);
+    out.push(`      await expect(page.getByText(${BOT_CHECK.toString()}).first(), ${JSON.stringify(`분석 시 접속 차단됨 (${page.blocked}). 사이트가 자동화 접근을 막고 있습니다.`)}).toHaveCount(0);`);
     out.push(`    });`);
     out.push(`  });`);
+    return [...out, `});`, ``].join('\n');
   }
+  for (const t of page.tables || []) {
+    out.push(`    await test.step(${JSON.stringify(`표 구조: ${t.nth + 1}번째 표 (컬럼 ${t.columns}개, 데이터 행 있음)`)}, async () => {`);
+    out.push(`      const table = page.getByRole('table').nth(${t.nth});`);
+    if (t.columns) out.push(`      await expect(table.getByRole('columnheader')).toHaveCount(${t.columns});`);
+    out.push(`      expect(await table.getByRole('row').count()).toBeGreaterThan(${t.columns ? 1 : 0});`);
+    out.push(`    });`);
+  }
+  out.push(`    await test.step('이미지 정상 로드', async () => {`);
+  out.push(`      await expectNoBrokenImages(page);`);
+  out.push(`    });`);
+  out.push(`    await test.step('JS 런타임 오류 없음', async () => {`);
+  out.push(`      expect.soft(errors).toEqual([]);`);
+  out.push(`    });`);
+  out.push(`  });`);
 
-  features.forEach((f, i) => {
-    const { title, body } = featureTest(f, `F-${String(i + 1).padStart(2, '0')}`);
-    const usesErrors = body.some((l) => l.includes('errors'));
-    out.push(``);
-    out.push(`  test(${JSON.stringify(title)}, async ({ page }) => {`);
-    out.push(`    const { ${usesErrors ? 'errors' : 'response: _'} } = await openPage(page, TARGET_URL);`);
-    out.push(`    const target = ${locatorCode(f.locator)};`);
-    body.forEach((l) => out.push(`    ${l}`));
-    out.push(`  });`);
-  });
+  // 화면 순서 정렬 (위→아래, 같은 줄이면 왼쪽→오른쪽)
+  const items = [
+    ...features.map((f) => ({ kind: 'element', f, pos: f.pos })),
+    ...page.texts.map((t) => ({ kind: 'text', text: t.text, pos: t.pos })),
+    ...page.images.map((i) => ({ kind: 'image', name: i.name, pos: i.pos })),
+    ...page.rolling.map((g) => ({ kind: 'rolling', g, pos: g.pos })),
+  ].sort((a, b) => a.pos.y - b.pos.y || a.pos.x - b.pos.x);
+
+  let no = 0;
+  let bundle = [];
+  const flush = () => {
+    if (!bundle.length) return;
+    out.push(``, ...contentTest(bundle, ++no, typos));
+    bundle = [];
+  };
+  for (const it of items) {
+    if (it.kind === 'text' || it.kind === 'image') {
+      bundle.push(it);
+      if (bundle.length >= 12) flush();
+      continue;
+    }
+    flush();
+    out.push(``, ...(it.kind === 'element' ? elementTest(it.f, ++no, typos) : rollingTest(it.g, ++no, typos)));
+  }
+  flush();
 
   out.push(`});`);
   out.push(``);
@@ -823,47 +1157,61 @@ function slugOf(pagePath) {
   targetPaths.forEach((p, idx) => console.log(`   ${String(idx).padStart(2, '0')}. ${p}`));
 
   // 시작 페이지를 먼저 분석해서 헤더/내비/푸터 공통 기능을 확정 → 다른 페이지에서는 중복 제외
-  console.log(`\n[2/4] 시작 페이지 + 공통 레이아웃(헤더/내비/푸터) 기능 분석 중...`);
+  console.log(`\n[2/4] 시작 페이지 분석: 링크·버튼·펼치기·탭·입력 요소를 하나씩 직접 눌러 동작 확인 중...`);
+  console.log(`  (헤더/메뉴/푸터처럼 모든 페이지에 반복되는 요소는 여기서 한 번만 확인합니다)`);
   const [startPath, ...subPaths] = targetPaths;
   const home = await analyzePage(context, startPath, { commonSignatures: new Set(), collectCommon: true });
   const commonSignatures = new Set([...home.common, ...home.features].map((f) => f.signature));
   console.log(`  -> 시작 페이지 기능 ${home.features.length}개, 공통 기능 ${home.common.length}개`);
 
-  console.log(`\n[3/4] 서브페이지 ${subPaths.length}개 기능 분석 중 (동시 ${CONCURRENCY}개)...`);
+  console.log(`\n[3/4] 세부 페이지 ${subPaths.length}개 분석: 각 페이지 본문의 링크·버튼·펼치기·입력 요소 동작 확인 중 (동시 ${CONCURRENCY}개)...`);
+  let done = 0;
   const subs = await runPool(subPaths, CONCURRENCY, async (p) => {
     const r = await analyzePage(context, p, { commonSignatures, collectCommon: false });
-    console.log(`  -> ${p}: 기능 ${r.features.length}개 탐지${r.skipped.length ? `, 제외 ${r.skipped.length}개` : ''}`);
+    done++;
+    console.log(`  -> [${done}/${subPaths.length}] ${p} 완료: 기능 ${r.features.length}개 탐지${r.skipped.length ? `, 제외 ${r.skipped.length}개` : ''}`);
     return r;
   });
   await browser.close();
 
-  console.log(`\n[4/4] 기능별 테스트 코드 작성...`);
+  console.log(`\n[4/4] 오타 의심 검사 + 화면 순서대로 테스트 케이스 작성...`);
+  const all = [home, ...subs];
+
+  // 기능 ID: P00 = 헤더/메뉴/푸터 공통 요소, P01~ = 각 페이지 (기획서 매핑에서 사용)
+  const pid = (i) => `P${String(i).padStart(2, '0')}`;
+  const withId = (prefix, list) => list.map((f, i) => ({ ...f, id: `${prefix}-F${String(i + 1).padStart(2, '0')}` }));
+  const commonFeatures = withId(pid(0), home.common);
+  all.forEach((r, i) => (r.features = withId(pid(i + 1), r.features)));
+
+  // 사이트 전체 문구를 모아 규칙 기반 오타 의심 검사 (같은 사이트 안 표기 비교가 핵심이라 전체를 한 번에)
+  const siteTexts = all.flatMap((r) => [
+    ...r.texts.map((t) => t.text),
+    ...r.rolling.flatMap((g) => g.texts),
+    ...[...r.features, ...r.common].flatMap((f) => [...(f.lines || []), ...(f.tooltip ? [f.tooltip] : [])]),
+  ]);
+  const typos = findTypos(siteTexts);
+  console.log(`  -> 문구 ${new Set(siteTexts).size}개 검사: 오타 의심 ${typos.size}건`);
+  for (const [t, reasons] of typos) console.log(`     ⚠ "${short(t, 40)}" - ${reasons.join(' / ')}`);
+
   const files = [];
   const write = (name, src) => {
     fs.writeFileSync(path.join(OUTPUT_DIR, name), src, 'utf-8');
     files.push(name);
-    console.log(`  -> [생성 완료] tests/generated/${name}`);
+    console.log(`  -> [생성 완료] ${name}`);
   };
-
-  if (home.common.length) {
-    write(
-      '00-common-layout.spec.ts',
-      specSource({ describeTitle: '[공통 레이아웃] 헤더 · 내비게이션 · 푸터', url: home.url, page: home, features: home.common, includeContent: false })
-    );
-  }
-  [home, ...subs].forEach((r, i) => {
+  all.forEach((r, i) => {
+    // 시작 페이지에는 헤더/메뉴/푸터 공통 요소까지 화면 순서대로 포함한다 (다른 페이지는 본문만)
+    const features = i === 0 ? [...commonFeatures, ...r.features] : r.features;
     write(
       `${String(i + 1).padStart(2, '0')}-${slugOf(r.path)}.spec.ts`,
-      specSource({ describeTitle: `[페이지 · ${PAGE_TYPE_LABEL[r.pageType]}] ${r.path}${r.title ? ` - ${r.title}` : ''}`, url: r.url, page: r, features: r.features, includeContent: true })
+      specSource({ describeTitle: `[페이지 · ${PAGE_TYPE_LABEL[r.pageType]}] ${r.path}${r.title ? ` - ${r.title}` : ''}`, page: r, features, typos })
     );
   });
 
-  // 분석 결과 원본 저장 (기획서 매핑에서도 사용)
-  // 기능 ID 는 생성된 테스트 번호와 동일: P01-F03 = 01번 spec 의 F-03, P00 = 공통 레이아웃
-  const pid = (i) => `P${String(i).padStart(2, '0')}`;
-  const withId = (prefix, list) => list.map(({ signature, ...f }, i) => ({ id: `${prefix}-F${String(i + 1).padStart(2, '0')}`, ...f }));
+  // 분석 결과 원본 저장 (기획서 매핑 · AI 분석 · 결과 화면에서 사용)
+  const strip = (list) => list.map(({ signature, ...f }) => f);
   fs.mkdirSync(path.join(OUTPUT_DIR, 'screens'), { recursive: true });
-  const pages = [home, ...subs].map(({ path: p, url, title, status, blocked, keyTexts, tables, pageType, features, skipped, errors, shot }, i) => {
+  const pages = all.map(({ path: p, url, title, status, blocked, keyTexts, texts, images, rolling, tables, pageType, features, skipped, errors, shot }, i) => {
     const screenshot = shot ? `screens/${pid(i + 1)}.jpg` : null;
     if (shot) fs.writeFileSync(path.join(OUTPUT_DIR, screenshot), shot);
     return {
@@ -873,27 +1221,40 @@ function slugOf(pagePath) {
       title,
       status,
       keyTexts,
+      texts,
+      images,
+      rolling,
       blocked: blocked || null,
       pageType,
       tables,
       screenshot,
-      features: withId(pid(i + 1), features),
+      features: strip(features),
       skipped,
       errors,
     };
   });
+  const typoList = [];
+  for (const [text, reasons] of typos) {
+    const where = all.filter((r) =>
+      [...r.texts.map((t) => t.text), ...r.rolling.flatMap((g) => g.texts), ...[...r.features, ...r.common].flatMap((f) => [...(f.lines || []), f.tooltip])].includes(text)
+    );
+    typoList.push({ text, reasons, pages: where.map((r) => r.path) });
+  }
   const analysis = {
     meta: { baseUrl: BASE_URL, startUrl: START_URL, scope: SCOPE, ...ENV, generatedAt: new Date().toISOString() },
-    common: { id: pid(0), url: home.url, features: withId(pid(0), home.common) },
+    common: { id: pid(0), url: home.url, features: strip(commonFeatures) },
     pages,
+    typos: typoList,
   };
   fs.writeFileSync(path.join(OUTPUT_DIR, 'analysis.json'), JSON.stringify(analysis, null, 2), 'utf-8');
 
   // 요약
   const summary = {};
-  for (const r of [home, ...subs]) for (const f of [...r.features, ...r.common]) summary[f.type] = (summary[f.type] || 0) + 1;
+  for (const r of all) for (const f of [...r.features, ...r.common]) summary[f.type] = (summary[f.type] || 0) + 1;
+  const count = (key) => all.reduce((n, r) => n + r[key].length, 0);
   console.log(`\n==================================================`);
   console.log(`분석 완료: 페이지 ${pages.length}개, spec ${files.length}개 (${Math.round((Date.now() - startedAt) / 1000)}초)`);
+  console.log(`  클릭 요소 ${Object.values(summary).reduce((a, b) => a + b, 0)}개 · 일반 문구 ${count('texts')}개 · 이미지 ${count('images')}개 · 롤링 배너 ${count('rolling')}개 · 오타 의심 ${typos.size}건`);
   Object.entries(summary).forEach(([type, n]) => console.log(`  ${TYPE_LABEL[type].padEnd(10)} ${n}건`));
   console.log(`상세 분석 결과: tests/generated/analysis.json`);
   console.log(`==================================================`);
