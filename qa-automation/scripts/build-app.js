@@ -4,9 +4,12 @@
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { buildIcons } = require('./build-icons');
 
 const ROOT = path.join(__dirname, '..');
+// Playwright 는 모듈을 불러오는 시점에 브라우저 경로를 정하므로, build-icons(→ playwright)를 require 하기 전에 지정해야 한다
+const browsersDir = path.join(ROOT, 'build', 'pw-browsers');
+process.env.PLAYWRIGHT_BROWSERS_PATH = browsersDir;
+const { buildIcons } = require('./build-icons');
 const target = process.argv[2] || (process.platform === 'darwin' ? 'mac' : 'win');
 if (!['win', 'mac'].includes(target)) {
   console.error('사용법: node scripts/build-app.js [win|mac]');
@@ -29,14 +32,12 @@ const run = (args, env = {}) =>
   // 앱에 포함할 테스트용 브라우저: Chrome(Chromium) · Safari(WebKit) · Firefox (대상 PC에 따로 설치할 필요 없음)
   // 아이콘 생성에도 브라우저가 필요하므로 먼저 받는다 (빈 CI 서버에서도 동작하도록)
   console.log(`[1/3] 테스트 브라우저 준비 (build/pw-browsers)`);
-  const browsersDir = path.join(ROOT, 'build', 'pw-browsers');
   const cli = path.join(path.dirname(require.resolve('@playwright/test/package.json')), 'cli.js');
   run([cli, 'install', 'chromium', 'webkit', 'firefox'], { PLAYWRIGHT_BROWSERS_PATH: browsersDir });
   // 실행 잠금 파일 등은 포함하지 않는다
   for (const f of fs.readdirSync(browsersDir)) if (f.startsWith('.')) fs.rmSync(path.join(browsersDir, f), { recursive: true, force: true });
 
   console.log(`\n[2/3] 아이콘 생성`);
-  process.env.PLAYWRIGHT_BROWSERS_PATH = browsersDir;
   await buildIcons();
 
   console.log(`\n[3/3] 설치 파일 빌드: QA_Automation_KC v${version} (${target})`);
