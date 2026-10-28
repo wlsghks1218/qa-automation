@@ -8,6 +8,8 @@ function locatorCode(spec) {
   const name = JSON.stringify(spec.name);
   const base = {
     role: () => `page.getByRole('${spec.role}', { name: ${name}, exact: true })`,
+    // 이름 끝 숫자 배지(알림 수 등)는 바뀌므로 숫자가 있어도/없어도 찾는다
+    roleBadge: () => `page.getByRole('${spec.role}', { name: new RegExp(${JSON.stringify(`^${escapeRegex(spec.name)}(\\s*\\d+\\+?)?$`)}) })`,
     label: () => `page.getByLabel(${name}, { exact: true })`,
     placeholder: () => `page.getByPlaceholder(${name}, { exact: true })`,
     css: () => `page.locator(${JSON.stringify(spec.selector)})`,

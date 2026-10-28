@@ -1,7 +1,7 @@
 const { chromium } = require('@playwright/test');
 const fs = require('fs');
 const path = require('path');
-const { short, locatorCode, urlMatcher, specHeader } = require('./lib/codegen');
+const { short, escapeRegex, locatorCode, urlMatcher, specHeader } = require('./lib/codegen');
 const { findTypos } = require('./lib/typo');
 const { buildCasesHtml } = require('../app/cases-report');
 
@@ -382,6 +382,12 @@ async function resolveLocator(page, cand) {
 
   // Playwright 권장 우선순위: role+name → label → placeholder → (링크 href) → 고유 속성
   if (role && name) {
+    // 이름 끝의 숫자 배지(알림 수 · 건수 '1', '99+')는 시간이 지나면 바뀌므로 숫자를 빼고 '숫자 있어도/없어도' 찾는다
+    const badge = name.match(/^(.*\S)\s+\d+\+?$/);
+    if (badge && !/^\d/.test(badge[1])) {
+      const spec = await tryLocator({ kind: 'roleBadge', role, name: badge[1] });
+      if (spec) return spec;
+    }
     const spec = await tryLocator({ kind: 'role', role, name });
     if (spec) return spec;
   }
@@ -429,9 +435,13 @@ async function resolveLocator(page, cand) {
   return null;
 }
 
+/** "휴가 신청 · 근태 정정" → 뒤에 숫자 배지가 붙어도(… 1, … 99+) 없어도 맞는 이름 패턴 */
+const badgeNamePattern = (name) => new RegExp(`^${escapeRegex(name)}(\\s*\\d+\\+?)?$`);
+
 function buildLocator(page, spec) {
   const base = {
     role: () => page.getByRole(spec.role, { name: spec.name, exact: true }),
+    roleBadge: () => page.getByRole(spec.role, { name: badgeNamePattern(spec.name) }),
     label: () => page.getByLabel(spec.name, { exact: true }),
     placeholder: () => page.getByPlaceholder(spec.name, { exact: true }),
     css: () => page.locator(spec.selector),
@@ -553,9 +563,11 @@ async function probeClick(page, loc, spec, noisy) {
  * 반환: { closeName } | { closeKey: 'Escape' } | {}
  */
 async function probeDialogClose(page, text) {
+  // 창 문구가 창 밖(누른 버튼 등)에도 있을 수 있으므로 '0개'가 아니라 '창이 열린 지금보다 줄었는가'로 판정
+  const opened = await page.getByText(text).filter({ visible: true }).count();
   const isGone = async () => {
     await page.waitForTimeout(700);
-    return (await page.getByText(text).filter({ visible: true }).count()) === 0;
+    return (await page.getByText(text).filter({ visible: true }).count()) < opened;
   };
 
   const closeBtn = page.getByRole('button', { name: DIALOG_CLOSE }).filter({ visible: true }).last();
@@ -887,7 +899,11 @@ async function analyzePage(newContext, pagePath, { commonSignatures, collectComm
     for (const { cand, spec, signature, bucket, risky } of resolved) {
       n++;
       const label = spec.name || cand.href || spec.selector || spec.role;
-      const lines = cand.lines.filter((t) => !noisy.has(t));
+      // 숫자만 있는 줄(알림 수 · 건수 · 금액 등)은 시간이 지나면 바뀌므로 문구 확인에서 뺀다
+      const lines = cand.lines
+        .filter((t) => !noisy.has(t) && !/^[\d\s.,:%+\-$₩()/]+$/.test(t))
+        // 이름 끝 숫자 배지가 있는 요소(… 1)는 문구 확인에서도 숫자를 뺀다
+        .map((t) => (spec.kind === 'roleBadge' ? t.replace(/\s+\d+\+?$/, '') : t));
       const base = { label, signature, locator: spec, href: cand.href, kind: kindOf(cand, spec), lines, hasImg: cand.hasImg, pos: cand.pos };
       const before = result[bucket].length;
       const where = collectCommon && bucket === 'common' ? '공통 ' : '';
@@ -1017,15 +1033,19 @@ function actionCode(f) {
     }
     case 'modal':
     case 'reveal':
+      // 열린 창의 문구가 화면 다른 곳(누른 버튼 자체 등)에도 있을 수 있으므로
+      // '보이는가'가 아니라 '보이는 개수가 늘었다가 원래대로 돌아오는가'로 판정한다
+      body.push(`const shown = page.getByText(${JSON.stringify(f.text)}).filter({ visible: true });`);
+      body.push(`const before = await shown.count();`);
       body.push(`await target.click();`);
-      body.push(`await expect(${textLoc(f.text)}).toBeVisible();`);
+      body.push(`await expect.poll(() => shown.count(), { message: ${JSON.stringify(`클릭 후 "${short(f.text, 30)}" 이(가) 나타나지 않음`)} }).toBeGreaterThan(before);`);
       // 모달: 분석 때 확인된 닫기 방법으로 닫히는지까지 검증
       if (f.closeName) {
         body.push(`await page.getByRole('button', { name: ${JSON.stringify(f.closeName)}, exact: true }).filter({ visible: true }).last().click();`);
-        body.push(`await expect(${textLoc(f.text)}).toBeHidden();`);
+        body.push(`await expect.poll(() => shown.count(), { message: '닫기 후에도 창이 남아 있음' }).toBe(before);`);
       } else if (f.closeKey) {
         body.push(`await page.keyboard.press(${JSON.stringify(f.closeKey)});`);
-        body.push(`await expect(${textLoc(f.text)}).toBeHidden();`);
+        body.push(`await expect.poll(() => shown.count(), { message: '닫기 후에도 창이 남아 있음' }).toBe(before);`);
       }
       return { action: `${TYPE_LABEL[f.type]} "${q(f.text)}"${f.closeName || f.closeKey ? ' 후 닫힘' : ''}`, body };
     case 'toggle':
