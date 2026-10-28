@@ -12,6 +12,7 @@ require('dotenv').config({ path: ENV_PATH, quiet: true });
 const { generateDocTestCases, mapDocToFeatures, toCsv } = require('./doc-testcases');
 const { PROVIDERS } = require('./llm');
 const { analyzeSiteWithAi } = require('./site-ai');
+const { buildCasesHtml } = require('./cases-report');
 const { writeDocSpecs } = require('../scripts/lib/doc-specs');
 const { name: APP_NAME, version: VERSION } = require('./version.json');
 
@@ -287,6 +288,7 @@ async function runJob({ url, scope, file, mode, browsers }) {
   };
   const llm = currentLlm();
   let mappings = null;
+  let plan = null; // 생성기 케이스 목록 (cases.json)
   let aiMappings = null;
 
   try {
@@ -316,6 +318,18 @@ async function runJob({ url, scope, file, mode, browsers }) {
       fs.copyFileSync(analysisPath, path.join(runDir, 'analysis.json'));
       // 규칙 기반 오타 의심 (LLM 없이). 테스트 실패가 아니라 경고로 따로 보여준다
       result.typos = analysis.typos || [];
+
+      // 케이스 목록(실행 전) → 결과 폴더의 cases.html. 테스트가 끝나면 같은 파일에 결과를 채운다
+      const casesPath = path.join(GENERATED_DIR, 'cases.json');
+      if (fs.existsSync(casesPath)) {
+        plan = JSON.parse(fs.readFileSync(casesPath, 'utf-8'));
+        fs.copyFileSync(casesPath, path.join(runDir, 'cases.json'));
+        const screens = path.join(GENERATED_DIR, 'screens');
+        if (fs.existsSync(screens)) fs.cpSync(screens, path.join(runDir, 'screens'), { recursive: true });
+        fs.writeFileSync(path.join(runDir, 'cases.html'), buildCasesHtml({ plan, result }), 'utf-8');
+        result.casesUrl = `/results/${id}/cases.html`;
+        log(`[케이스 목록] ${path.join(runDir, 'cases.html')} (실행 전)`);
+      }
 
       // 3) 기획서 TC ↔ 실제 화면 요소 매핑 → 기획서 기준 테스트 생성
       let docSpecCount = 0;
@@ -382,6 +396,15 @@ async function runJob({ url, scope, file, mode, browsers }) {
       result.docCsvUrl = `/results/${id}/doc-testcases.csv`;
     }
     result.finishedAt = Date.now();
+    if (plan || result.tests) {
+      // 실행 결과를 채운 케이스 보기 페이지 (기획서·AI 테스트 결과도 같은 파일 아래쪽에 포함)
+      try {
+        fs.writeFileSync(path.join(runDir, 'cases.html'), buildCasesHtml({ plan, result }), 'utf-8');
+        result.casesUrl = `/results/${id}/cases.html`;
+      } catch (e) {
+        log(`[경고] cases.html 생성 실패: ${e.message}`);
+      }
+    }
     fs.writeFileSync(path.join(runDir, 'summary.json'), JSON.stringify(result, null, 2), 'utf-8');
     state.running = false;
     state.result = result;
@@ -569,7 +592,7 @@ function start({ port = 0, hooks: overrides = {} } = {}) {
   });
 }
 
-module.exports = { start, APP_NAME, VERSION };
+module.exports = { start, summarizeReport, APP_NAME, VERSION };
 
 // ─────────────────────────────────────────────────────────────
 // 개발 모드 단독 실행: node app/server.js  (Edge/Chrome 앱 모드 창으로 열기)

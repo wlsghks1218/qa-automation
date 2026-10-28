@@ -5,9 +5,6 @@
   "main": "app/main.js",
   "type": "commonjs",
   "scripts": {
-    "test": "npx playwright test --project=\"Desktop Chrome\"",
-    "test:runner": "node runner.js",
-    "report": "npx playwright show-report",
     "generate": "node scripts/generate-specs.js",
     "test:generated": "npx playwright test --config app/playwright.generated.config.js",
     "app": "electron .",

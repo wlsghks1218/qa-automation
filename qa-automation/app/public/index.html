@@ -772,6 +772,7 @@
         <h2>실행 결과</h2>
         <span class="meta">${target} · ${r.mode === 'ai' ? 'AI 테스트' : '규칙 기반 테스트'} · ${r.scope === 'all' ? '세부 사이트 모두' : '입력한 범위만'} · ${Math.floor(took / 60)}분 ${took % 60}초</span>
         <span class="grow"></span>
+        ${r.casesUrl ? `<a class="ghost small" href="${r.casesUrl}" target="_blank">케이스 보기 (HTML)</a>` : ''}
         <button class="ghost small" type="button" onclick="fetch('/api/open-folder',{method:'POST',body:JSON.stringify({id:${JSON.stringify(r.id)}})})">결과 폴더 열기</button>
       </div>
       ${errors}

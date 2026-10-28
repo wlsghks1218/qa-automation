@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { short, locatorCode, urlMatcher, specHeader } = require('./lib/codegen');
 const { findTypos } = require('./lib/typo');
+const { buildCasesHtml } = require('../app/cases-report');
 
 // 사용법: node scripts/generate-specs.js <URL> [--scope=all|single]
 //   --scope=all    : 입력한 URL + 연결된 세부 페이지 모두 분석 (기본값)
@@ -392,10 +393,26 @@ async function probe(page, spec, noisy) {
       const role = await page.getByRole('tooltip').filter({ visible: true }).first().innerText({ timeout: 300 }).catch(() => '');
       const idleLines = new Set(idle.lines);
       const hovered = await pageState(page);
-      tooltip =
-        role.split('\n').map((t) => t.trim().replace(/\s+/g, ' ')).find(Boolean) ||
-        hovered.lines.find((t) => !idleLines.has(t) && !noisy.has(t) && isAssertableText(t)) ||
-        null;
+      const box = await loc.boundingBox().catch(() => null);
+      // 마우스를 올린 요소 근처(200px 이내)에 새로 나타난 문구만 툴팁으로 본다 (멀리서 저절로 바뀐 문구 제외)
+      const nearTarget = async (t) => {
+        if (!box) return false;
+        const b = await page.getByText(t, { exact: true }).filter({ visible: true }).first().boundingBox({ timeout: 500 }).catch(() => null);
+        if (!b) return false;
+        const dx = Math.max(0, b.x - (box.x + box.width), box.x - (b.x + b.width));
+        const dy = Math.max(0, b.y - (box.y + box.height), box.y - (b.y + b.height));
+        return dx <= 200 && dy <= 200;
+      };
+      tooltip = role.split('\n').map((t) => t.trim().replace(/\s+/g, ' ')).find(Boolean) || null;
+      if (!tooltip) {
+        for (const t of hovered.lines) {
+          if (idleLines.has(t) || noisy.has(t) || !isAssertableText(t)) continue;
+          if (await nearTarget(t)) {
+            tooltip = t;
+            break;
+          }
+        }
+      }
       if (tooltip && !isAssertableText(tooltip)) tooltip = null;
       await page.mouse.move(0, 0);
       await page.waitForTimeout(300);
@@ -1117,6 +1134,30 @@ function specSource({ describeTitle, page, features, typos }) {
   return out.join('\n');
 }
 
+/**
+ * 생성한 spec 코드에서 케이스 목록을 뽑는다: 케이스 제목 + 확인 항목(c.run / c.skip / c.warn / test.step).
+ * 코드에서 직접 뽑으므로 목록과 실제 실행 내용이 어긋나지 않는다.
+ */
+function planFromSource(src) {
+  const STR = `('(?:[^'\\\\]|\\\\.)*'|"(?:[^"\\\\]|\\\\.)*")`;
+  const lit = (s) => (s.startsWith("'") ? s.slice(1, -1) : JSON.parse(s));
+  const cases = [];
+  for (const line of src.split('\n')) {
+    let m = line.match(new RegExp(`^  test\\(${STR}, async \\(`));
+    if (m) {
+      cases.push({ title: lit(m[1]), checks: [] });
+      continue;
+    }
+    const cur = cases[cases.length - 1];
+    if (!cur) continue;
+    if ((m = line.match(new RegExp(`^\\s+await c\\.run\\(${STR}`)))) cur.checks.push({ name: lit(m[1]), kind: 'run' });
+    else if ((m = line.match(new RegExp(`^\\s+c\\.skip\\(${STR}, ${STR}\\)`)))) cur.checks.push({ name: lit(m[1]), kind: 'skip', detail: lit(m[2]) });
+    else if ((m = line.match(new RegExp(`^\\s+c\\.warn\\(${STR}, (\\[.*\\])\\);`)))) cur.checks.push({ name: `오타 의심: "${lit(m[1])}"`, kind: 'warn', detail: JSON.parse(m[2]).join(' / ') });
+    else if ((m = line.match(new RegExp(`^\\s+await test\\.step\\(${STR}`)))) cur.checks.push({ name: lit(m[1]), kind: 'step' });
+  }
+  return cases;
+}
+
 function slugOf(pagePath) {
   if (pagePath === '/') return 'home';
   const slug = pagePath.replace(/[^a-zA-Z0-9]/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '');
@@ -1199,13 +1240,21 @@ function slugOf(pagePath) {
     files.push(name);
     console.log(`  -> [생성 완료] ${name}`);
   };
+  const planPages = [];
   all.forEach((r, i) => {
     // 시작 페이지에는 헤더/메뉴/푸터 공통 요소까지 화면 순서대로 포함한다 (다른 페이지는 본문만)
     const features = i === 0 ? [...commonFeatures, ...r.features] : r.features;
-    write(
-      `${String(i + 1).padStart(2, '0')}-${slugOf(r.path)}.spec.ts`,
-      specSource({ describeTitle: `[페이지 · ${PAGE_TYPE_LABEL[r.pageType]}] ${r.path}${r.title ? ` - ${r.title}` : ''}`, page: r, features, typos })
-    );
+    const describeTitle = `[페이지 · ${PAGE_TYPE_LABEL[r.pageType]}] ${r.path}${r.title ? ` - ${r.title}` : ''}`;
+    const src = specSource({ describeTitle, page: r, features, typos });
+    write(`${String(i + 1).padStart(2, '0')}-${slugOf(r.path)}.spec.ts`, src);
+    planPages.push({
+      group: describeTitle,
+      path: r.path,
+      url: r.url,
+      blocked: r.blocked || null,
+      screenshot: r.shot ? `screens/${pid(i + 1)}.jpg` : null,
+      cases: planFromSource(src),
+    });
   });
 
   // 분석 결과 원본 저장 (기획서 매핑 · AI 분석 · 결과 화면에서 사용)
@@ -1247,6 +1296,12 @@ function slugOf(pagePath) {
     typos: typoList,
   };
   fs.writeFileSync(path.join(OUTPUT_DIR, 'analysis.json'), JSON.stringify(analysis, null, 2), 'utf-8');
+
+  // 케이스 목록(실행 전): 테스트 실행 후 같은 목록에 결과를 채워 cases.html 을 다시 만든다
+  const plan = { meta: analysis.meta, typos: typoList, pages: planPages };
+  fs.writeFileSync(path.join(OUTPUT_DIR, 'cases.json'), JSON.stringify(plan, null, 2), 'utf-8');
+  fs.writeFileSync(path.join(OUTPUT_DIR, 'cases.html'), buildCasesHtml({ plan }), 'utf-8');
+  console.log(`  -> [케이스 목록] cases.html (케이스 ${planPages.reduce((n, p) => n + p.cases.length, 0)}개, 실행 전)`);
 
   // 요약
   const summary = {};
