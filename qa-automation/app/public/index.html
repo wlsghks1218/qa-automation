@@ -133,6 +133,14 @@
   .progress.show { display: block; }
   .phase { display: flex; align-items: center; gap: 10px; font-weight: 600; }
   .stop-btn { margin-left: auto; color: var(--fail); border-color: var(--fail); }
+  .pbar-wrap { margin-top: 14px; }
+  .pbar-label { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; color: var(--muted); margin-bottom: 6px; font-variant-numeric: tabular-nums; }
+  .pbar-label b { color: var(--text); }
+  .pbar { display: flex; height: 10px; border-radius: 999px; background: var(--surface-2, #eceff3); overflow: hidden; }
+  .pbar i { display: block; height: 100%; transition: width .3s ease; }
+  .pbar .ok { background: var(--pass); }
+  .pbar .bad { background: var(--fail); }
+  .pbar .run { background: var(--accent, #3b5bdb); }
   .stop-btn:disabled { opacity: .6; cursor: default; }
   .spinner { width: 16px; height: 16px; border: 2px solid var(--accent-weak); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -396,6 +404,10 @@
 
   <section class="card progress" id="progress">
     <div class="phase"><div class="spinner"></div><span id="phaseText">준비 중</span><span class="elapsed" id="elapsed"></span><button class="ghost small stop-btn" type="button" id="stopBtn">중지</button></div>
+    <div class="pbar-wrap" id="pbarWrap" hidden>
+      <div class="pbar-label"><span id="pbarText"></span><b id="pbarPct"></b></div>
+      <div class="pbar"><i class="ok" id="pbarOk"></i><i class="bad" id="pbarBad"></i><i class="run" id="pbarRun"></i></div>
+    </div>
     <details class="log" open>
       <summary>실행 로그</summary>
       <div class="console" id="console"></div>
@@ -695,8 +707,29 @@
     await fetch('/api/stop', { method: 'POST', body: '{}' }).catch(() => {});
   });
 
+  // 진행률: 분석 = 분석한 페이지 / 전체 페이지, 테스트 = 끝난 케이스 / 전체 케이스 (통과 초록 · 실패 빨강)
+  function showProgress(p) {
+    $('pbarWrap').hidden = !p || !p.total;
+    if (!p || !p.total) return;
+    const pct = (n) => `${Math.min(100, (n / p.total) * 100)}%`;
+    const percent = Math.floor((p.done / p.total) * 100);
+    if (p.stage === 'test') {
+      $('pbarText').textContent = `테스트 진행 ${p.done} / ${p.total}건 · 통과 ${p.passed} · 실패 ${p.failed}`;
+      $('pbarOk').style.width = pct(p.passed);
+      $('pbarBad').style.width = pct(p.failed);
+      $('pbarRun').style.width = pct(Math.max(0, p.done - p.passed - p.failed));
+    } else {
+      $('pbarText').textContent = `페이지 분석 ${p.done} / ${p.total}개`;
+      $('pbarOk').style.width = '0%';
+      $('pbarBad').style.width = '0%';
+      $('pbarRun').style.width = pct(p.done);
+    }
+    $('pbarPct').textContent = `${percent}%`;
+  }
+
   function setRunning(on, phase) {
     running = on;
+    if (!on) showProgress(null);
     $('stopBtn').disabled = !on;
     $('stopBtn').textContent = '중지';
     $('progress').classList.toggle('show', on);
@@ -918,7 +951,7 @@
     applyLlm(s.llm);
     showResultsDir(s.resultsDir);
     s.logs.forEach(appendLog);
-    if (s.running) { startedAt = Date.now(); setRunning(true, s.phase); }
+    if (s.running) { startedAt = Date.now(); setRunning(true, s.phase); showProgress(s.progress); }
     renderResult(s.result);
     refreshForm();
 
@@ -927,10 +960,12 @@
       $('console').textContent = '';
       startedAt = Date.now();
       renderResult(null);
+      showProgress(null);
       setRunning(true);
     });
     es.addEventListener('phase', (e) => { const p = JSON.parse(e.data); if (p) $('phaseText').textContent = p; });
     es.addEventListener('log', (e) => appendLog(JSON.parse(e.data)));
+    es.addEventListener('progress', (e) => showProgress(JSON.parse(e.data)));
     // 로그인 창이 닫히거나 저장되면 상태 갱신 (사용자가 창을 직접 닫은 경우 포함)
     es.addEventListener('login', (e) => {
       const info = JSON.parse(e.data);

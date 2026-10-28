@@ -493,9 +493,25 @@ async function probe(page, spec, noisy) {
   return withTip(effect);
 }
 
+/** 표 머리글 안의 요소면 그 표의 앞쪽 행 내용(정렬 확인용), 아니면 null */
+const tableRowsOf = (loc) =>
+  loc
+    .evaluate((el) => {
+      if (!el.closest('th, [role="columnheader"]')) return null;
+      const t = el.closest('table, [role="table"], [role="grid"]');
+      if (!t) return null;
+      const rows = Array.from(t.querySelectorAll('tbody tr, [role="rowgroup"]:not(:first-child) [role="row"]'));
+      return rows.slice(0, 10).map((r) => r.textContent.trim().replace(/\s+/g, ' ')).join('|');
+    })
+    .catch(() => null);
+
+/** 문구가 화면의 한 요소로 실제로 찾아지는지 (표 한 줄을 이어 붙인 텍스트 같은 가짜 문구 제외) */
+const isVisibleText = async (page, t) => (await page.getByText(t).filter({ visible: true }).count().catch(() => 0)) > 0;
+
 async function probeClick(page, loc, spec, noisy) {
   const before = await pageState(page);
   const expandedBefore = await loc.getAttribute('aria-expanded', { timeout: 1000 }).catch(() => null);
+  const rowsBefore = await tableRowsOf(loc);
 
   let popup = null;
   const onPopup = (p) => (popup = p);
@@ -532,7 +548,13 @@ async function probeClick(page, loc, spec, noisy) {
   const beforeKeys = new Set(before.overlays.map((o) => o.key));
   const newOverlay = after.overlays.find((o) => !beforeKeys.has(o.key));
   if (newOverlay) {
-    const text = newOverlay.lines.find(fresh) || newOverlay.lines.find(isAssertableText);
+    let text = null;
+    for (const t of [...newOverlay.lines.filter(fresh), ...newOverlay.lines.filter(isAssertableText)]) {
+      if (await isVisibleText(page, t)) {
+        text = t;
+        break;
+      }
+    }
     if (text) return { type: 'modal', text, ...(await probeDialogClose(page, text)), dirty: true };
   }
 
@@ -552,8 +574,15 @@ async function probeClick(page, loc, spec, noisy) {
     }
   }
 
-  const revealed = after.lines.find(fresh);
-  if (revealed) return { type: 'reveal', text: revealed, dirty: true };
+  // 표 머리글 정렬 버튼: 행 순서가 바뀌었으면 '표 정렬'
+  if (rowsBefore !== null) {
+    const rowsAfter = await tableRowsOf(loc);
+    if (rowsAfter !== null && rowsAfter !== rowsBefore) return { type: 'sort', dirty: true };
+  }
+
+  for (const t of after.lines.filter(fresh)) {
+    if (await isVisibleText(page, t)) return { type: 'reveal', text: t, dirty: true };
+  }
 
   return { type: 'none', dirty: before.lines.length !== after.lines.length };
 }
@@ -662,7 +691,17 @@ async function detectRolling(page, samples = 9, interval = 700) {
         let clipY = null;
         for (let a = el; a && a !== document.body; a = a.parentElement) {
           const s = getComputedStyle(a);
-          if (s.visibility === 'hidden' || s.display === 'none' || Number(s.opacity) < 0.1) visible = false;
+          if (s.visibility === 'hidden' || s.display === 'none' || Number(s.opacity) < 0.1) {
+            visible = false;
+            // display:none · 투명 처리로 숨기는 슬라이드: 숨겨진 슬라이드의 부모(슬라이드 목록)를 같은 롤링 영역으로 본다
+            const box = a.parentElement;
+            if (!clip && box && box !== document.body) {
+              if (!box.dataset.qaClip) box.dataset.qaClip = String(++clipSeq);
+              clip = box.dataset.qaClip;
+              const br = box.getBoundingClientRect();
+              clipY = Math.round(br.top + scrollY);
+            }
+          }
           if (a !== el && (s.overflowX !== 'visible' || s.overflowY !== 'visible')) {
             const ar = a.getBoundingClientRect();
             if (r.right <= ar.left + 2 || r.left >= ar.right - 2 || r.bottom <= ar.top + 2 || r.top >= ar.bottom - 2) {
@@ -704,15 +743,19 @@ async function detectRolling(page, samples = 9, interval = 700) {
 
   const groups = new Map();
   for (const [text, h] of history) {
-    if (h.seen !== samples || h.shown === 0 || h.shown === samples || !h.clip) continue;
+    // 항상 보이는 문구는 롤링이 아니다. 계속 숨어 있던 문구는 같은 영역에 롤링이 있을 때만 포함(관찰 시간 동안 차례가 안 온 슬라이드)
+    if (h.seen !== samples || h.shown === samples || !h.clip) continue;
     if (!isAssertableText(text)) continue;
-    if (!groups.has(h.clip)) groups.set(h.clip, { texts: [], y: h.y });
+    if (!groups.has(h.clip)) groups.set(h.clip, { texts: [], toggled: 0, y: h.y });
     const g = groups.get(h.clip);
     g.texts.push(text);
-    g.y = Math.min(g.y, h.y);
+    if (h.shown > 0) {
+      g.toggled++;
+      g.y = Math.min(g.y, h.y);
+    }
   }
   // 보였다 안 보였다 하는 문구가 2개 이상이어야 롤링으로 본다 (깜빡임 하나는 제외)
-  return [...groups.values()].filter((g) => g.texts.length >= 2).map((g) => ({ texts: g.texts.slice(0, 10), pos: { y: g.y, x: 0 } }));
+  return [...groups.values()].filter((g) => g.toggled >= 2).map((g) => ({ texts: g.texts.slice(0, 10), pos: { y: g.y, x: 0 } }));
 }
 
 // 진행 로그용: 요소 종류 이름
@@ -994,6 +1037,7 @@ const TYPE_LABEL = {
   brokenLink: '깨진 링크',
   select: '선택 박스',
   anchor: '목차/앵커 이동',
+  sort: '표 정렬',
   display: '노출·문구만 확인',
 };
 
@@ -1064,6 +1108,13 @@ function actionCode(f) {
       body.push(`await target.click();`);
       body.push(`await expect(page.locator(${JSON.stringify(`[id="${f.anchorId}"]`)})).toBeInViewport();`);
       return { action: `목차 이동 → #${f.anchorId}`, body };
+    case 'sort':
+      // 표 머리글 정렬: 누르기 전과 행 순서가 달라지는지
+      body.push(`const rows = () => target.evaluate((el) => { const t = el.closest('table, [role="table"], [role="grid"]'); return t ? Array.from(t.querySelectorAll('tbody tr, [role="rowgroup"]:not(:first-child) [role="row"]')).slice(0, 10).map((r) => (r.textContent || '').trim().replace(/\\s+/g, ' ')).join('|') : ''; });`);
+      body.push(`const before = await rows();`);
+      body.push(`await target.click();`);
+      body.push(`await expect.poll(rows, { message: '정렬 버튼을 눌러도 표의 행 순서가 바뀌지 않음' }).not.toBe(before);`);
+      return { action: '표 정렬', body };
     case 'tab':
       body.push(`await target.click();`);
       body.push(`await expect(target).toHaveAttribute('aria-selected', 'true');`);

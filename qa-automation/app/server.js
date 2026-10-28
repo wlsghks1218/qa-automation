@@ -13,6 +13,8 @@ const { generateDocTestCases, mapDocToFeatures, toCsv } = require('./doc-testcas
 const { PROVIDERS } = require('./llm');
 const { analyzeSiteWithAi } = require('./site-ai');
 const { buildCasesHtml } = require('./cases-report');
+// 테스트 진행률(완료/전체)을 출력하는 리포터 → 앱 프로그레스 바
+const PROGRESS_REPORTER = path.join(__dirname, 'progress-reporter.js');
 const { writeDocSpecs } = require('../scripts/lib/doc-specs');
 const { name: APP_NAME, version: VERSION } = require('./version.json');
 
@@ -106,7 +108,26 @@ function pickFolderWin(initial) {
   });
 }
 
-const state = { running: false, phase: '', logs: [], result: null, child: null, stopRequested: false };
+const state = { running: false, phase: '', logs: [], result: null, child: null, stopRequested: false, progress: null };
+
+/** 진행률: 분석 단계는 '분석한 페이지 / 전체 페이지', 테스트 단계는 '끝난 케이스 / 전체 케이스' */
+function setProgress(p) {
+  state.progress = p;
+  broadcast('progress', p);
+}
+
+/** 생성기·테스트 출력에서 진행 상황을 읽는다. 진행 전용 줄([진행])은 로그에 남기지 않는다 */
+function handleProgress(line) {
+  let m = line.match(/^\[진행\] (\d+)\/(\d+) (\d+) (\d+)$/);
+  if (m) {
+    setProgress({ stage: 'test', done: +m[1], total: +m[2], passed: +m[3], failed: +m[4] });
+    return true;
+  }
+  if ((m = line.match(/분석 대상 경로 총 (\d+)개/))) setProgress({ stage: 'analysis', done: 0, total: +m[1] });
+  else if (/-> 시작 페이지 기능 \d+개/.test(line) && state.progress) setProgress({ ...state.progress, done: 1 });
+  else if ((m = line.match(/-> \[(\d+)\/(\d+)\] /))) setProgress({ stage: 'analysis', done: +m[1] + 1, total: +m[2] + 1 });
+  return false;
+}
 
 /** 실행 중인 자식 프로세스와 그 아래 브라우저·워커까지 모두 종료 */
 function killTree(child) {
@@ -170,7 +191,7 @@ function runNode(args, env = {}) {
         buf += chunk.toString('utf-8');
         const lines = buf.split('\n');
         buf = lines.pop();
-        lines.forEach(log);
+        lines.forEach((l) => handleProgress(l.replace(/\r$/, '')) || log(l));
       });
       stream.on('end', () => buf && log(buf));
     };
@@ -360,6 +381,7 @@ async function runJob({ url, scope, file, mode, browsers, useLogin, clickAll }) 
 
   state.running = true;
   state.stopRequested = false;
+  state.progress = null;
   state.logs = [];
   state.result = null;
   broadcast('start', { id });
@@ -467,7 +489,7 @@ async function runJob({ url, scope, file, mode, browsers, useLogin, clickAll }) 
       const docOnly = scope === 'single' && result.doc && docSpecCount > 0;
       setPhase(`${docOnly ? '기획서 기반 테스트' : '생성된 테스트'} 실행 중 (${browsers.map((b) => BROWSER_LABEL[b]).join(', ')})`);
       const reportDir = path.join(runDir, 'report');
-      await runNode([PLAYWRIGHT_CLI, 'test', '--config', PLAYWRIGHT_CONFIG, '--reporter=list,html,json'], {
+      await runNode([PLAYWRIGHT_CLI, 'test', '--config', PLAYWRIGHT_CONFIG, `--reporter=list,html,json,${PROGRESS_REPORTER}`], {
         QA_TEST_SUBDIR: docOnly ? 'doc' : '',
         QA_BROWSERS: browsers.join(','),
         PLAYWRIGHT_JSON_OUTPUT_NAME: path.join(runDir, 'results.json'),
@@ -600,6 +622,7 @@ const server = http.createServer(async (req, res) => {
         version: VERSION,
         running: state.running,
         phase: state.phase,
+        progress: state.progress,
         logs: state.logs.slice(-300),
         result: state.result,
         hasApiKey: !!currentLlm().apiKey,
