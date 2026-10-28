@@ -164,6 +164,14 @@ function log(line) {
   state.logs.push(clean);
   if (state.logs.length > 2000) state.logs.shift();
   broadcast('log', clean);
+  // 실행 중이면 결과 폴더의 run.log 에도 전체 로그를 남긴다 (화면 로그는 최근 줄만 보관)
+  if (state.logFile) {
+    try {
+      fs.appendFileSync(state.logFile, `${clean}\n`, 'utf-8');
+    } catch {
+      // 로그 파일 기록 실패는 실행에 영향 주지 않음
+    }
+  }
 }
 
 function setPhase(phase) {
@@ -378,6 +386,7 @@ async function runJob({ url, scope, file, mode, browsers, useLogin, clickAll }) 
   const runDir = path.join(settings.resultsDir, id);
   fs.mkdirSync(runDir, { recursive: true });
   runDirs.set(id, runDir);
+  state.logFile = path.join(runDir, 'run.log');
 
   state.running = true;
   state.stopRequested = false;
@@ -532,6 +541,7 @@ async function runJob({ url, scope, file, mode, browsers, useLogin, clickAll }) 
     }
     fs.writeFileSync(path.join(runDir, 'summary.json'), JSON.stringify(result, null, 2), 'utf-8');
     state.running = false;
+    state.logFile = null;
     state.result = result;
     setPhase('');
     broadcast('done', result);

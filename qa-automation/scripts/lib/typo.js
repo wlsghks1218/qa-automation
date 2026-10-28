@@ -71,15 +71,33 @@ function formatIssues(text) {
   return out;
 }
 
-// 영어는 짧은 단어끼리 한 글자 차이인 정상 단어가 많아(Home/Some) 6글자 이상만 비교
-const tokensOf = (text) => text.match(/[가-힣]{2,}|[A-Za-z]{6,}/g) || [];
+// 영어는 짧은 단어끼리 한 글자 차이인 정상 단어가 많아(Home/Some, content/consent) 8글자 이상만 비교
+const tokensOf = (text) => text.match(/[가-힣]{2,}|[A-Za-z]{8,}/g) || [];
+
+// 코드 예시처럼 보이는 문구는 맞춤법 검사 대상이 아니다 (괄호 짝·기호가 정상적으로 안 맞음)
+const looksLikeCode = (t) =>
+  /[{};=<>`$]|=>|\w\(|\)\s*;|[a-z][A-Z][a-z]/.test(t) ||
+  /^[^가-힣A-Za-z]*$/.test(t) ||
+  // 공백·한글 없이 괄호가 붙은 한 덩어리 (코드 조각: addresses[, (msg)
+  /^[^\s가-힣]*[()[\]{}][^\s가-힣]*$/.test(t);
+
+// 조사만 다른 경우(응답이/응답의, 건이/건의)는 오타가 아니다
+const PARTICLES = new Set('이의가를을은는에도로와과만'.split(''));
+
+// 사이트 안 빈도와 관계없이 거의 항상 틀린 표기
+const MISSPELLINGS = [
+  ['되요', '돼요'], ['됬', '됐'], ['몇일', '며칠'], ['할께', '할게'], ['갈께', '갈게'], ['볼께', '볼게'],
+  ['오랫만', '오랜만'], ['역활', '역할'], ['희안', '희한'], ['어떻해', '어떡해/어떻게'], ['왠만', '웬만'],
+  ['일일히', '일일이'], ['깨끗히', '깨끗이'], ['설겆이', '설거지'], ['뵈요', '봬요'], ['어의없', '어이없'],
+  ['문안하', '무난하'], ['내노라', '내로라'], ['않되', '안 되'], ['안되요', '안 돼요'],
+];
 
 /**
  * texts: 사이트 전체에서 수집한 문구 목록
  * 반환: Map<문구, string[]> - 오타 의심 사유 (의심 없는 문구는 없음)
  */
 function findTypos(texts) {
-  const unique = [...new Set(texts)];
+  const unique = [...new Set(texts)].filter((t) => !looksLikeCode(t));
   const freq = new Map();
   for (const t of unique) for (const w of tokensOf(t)) freq.set(w, (freq.get(w) || 0) + 1);
 
@@ -93,7 +111,11 @@ function findTypos(texts) {
       if (word.length < f.length || /^[A-Za-z]/.test(word) !== latin) continue;
       // 한글은 조사가 붙으므로 앞부분(어간)끼리, 영어는 단어 전체끼리 비교
       if (latin && word.length !== f.length) continue;
+      // 한글 두 글자 단어는 한 자모 차이의 정상 단어가 많다 (메일/매일, 가지/까지) → 세 글자 이상만 비교
+      if (!latin && f.length < 3) continue;
       const head = word.slice(0, f.length);
+      // 마지막 글자가 조사끼리만 다르면 정상 (응답이/응답의)
+      if (!latin && head.slice(0, -1) === f.slice(0, -1) && PARTICLES.has(head.slice(-1)) && PARTICLES.has(f.slice(-1))) continue;
       // 한 글자짜리 차이로 다른 흔한 단어가 되는 경우는 정상 단어일 가능성이 높다
       if (head === f || (freq.get(head) || 0) > 1) continue;
       const cmp = /^[A-Za-z]/.test(f) ? head.toLowerCase() : head;
@@ -109,6 +131,7 @@ function findTypos(texts) {
   for (const t of unique) {
     const reasons = formatIssues(t);
     for (const w of tokensOf(t)) if (suspectOf.has(w)) reasons.push(suspectOf.get(w));
+    for (const [wrong, right] of MISSPELLINGS) if (t.includes(wrong)) reasons.push(`자주 틀리는 표기: "${wrong}" → "${right}"`);
     if (reasons.length) result.set(t, [...new Set(reasons)]);
   }
   return result;

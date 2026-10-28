@@ -831,6 +831,8 @@ async function collectScreenItems(page) {
       if (/^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|OPTION)$/.test(el.tagName)) continue;
       // 클릭 요소 안의 문구/이미지는 그 요소의 '문구' 검사에서 확인한다
       if (el.closest(selector)) continue;
+      // 개발 문서의 코드 예시는 문구(오타) 확인 대상이 아니다
+      if (el.closest('pre, code, kbd, samp')) continue;
       // 표의 데이터 행은 실제 데이터라 계속 바뀌므로 문구로 확인하지 않는다 (표 구조 확인으로 대신)
       if (el.closest('tbody tr, [role="row"]') && !el.closest('thead, [role="columnheader"]')) continue;
       // 반복 목록(같은 형식 항목 3개 이상)은 첫 항목의 문구만 대표로 확인
@@ -1297,9 +1299,11 @@ function actionCode(f) {
       body.push(`const popupPromise = page.waitForEvent('popup');`);
       body.push(`await target.click();`);
       body.push(`const popup = await popupPromise;`);
-      body.push(`await expect(popup).toHaveURL(${urlMatcher(f.url, true)});`);
+      // 분석 때 새 탭 주소를 못 얻은 경우(about:blank 후 바로 닫힘 등)는 새 탭이 열리는지만 확인
+      const valid = /^https?:/.test(f.url || '');
+      if (valid) body.push(`await expect(popup).toHaveURL(${urlMatcher(f.url, true)});`);
       body.push(`await popup.close();`);
-      return { action: `새 탭 열기 → ${new URL(f.url).host}`, body };
+      return { action: valid ? `새 탭 열기 → ${new URL(f.url).host}` : '새 탭 열기', body };
     }
     case 'modal':
     case 'reveal':
@@ -1606,8 +1610,15 @@ function specSource({ describeTitle, page, features, typos }) {
       continue;
     }
     flush();
-    const build = { element: () => elementTest(it.f, ++no, typos), rolling: () => rollingTest(it.g, ++no, typos), table: () => tableTest(it.t, ++no) }[it.kind];
-    out.push(``, ...build());
+    const build = { element: () => elementTest(it.f, no + 1, typos), rolling: () => rollingTest(it.g, no + 1, typos), table: () => tableTest(it.t, no + 1) }[it.kind];
+    // 케이스 하나를 만들다 오류가 나도 그 케이스만 빼고 계속 (분석 전체를 잃지 않도록)
+    try {
+      const lines = build();
+      no++;
+      out.push(``, ...lines);
+    } catch (e) {
+      console.warn(`   ⚠ [${page.path}] 케이스 생성 건너뜀 (${it.kind}${it.f ? ` "${short(String(it.f.label), 20)}"` : ''}): ${e.message}`);
+    }
   }
   flush();
 
