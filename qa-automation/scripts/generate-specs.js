@@ -322,6 +322,7 @@ async function collectCandidates(page) {
       let placeholder = '';
       let formButton = '';
       let option = '';
+      let selectOptions = [];
       if (['input', 'textarea', 'select'].includes(tag)) {
         label = clean(el.labels && el.labels[0] ? el.labels[0].innerText : '');
         placeholder = clean(el.getAttribute('placeholder'));
@@ -331,6 +332,50 @@ async function collectCandidates(page) {
         if (tag === 'select') {
           const opt = Array.from(el.options).find((o) => o.value && !o.disabled && !o.selected);
           if (opt) option = opt.value;
+          selectOptions = Array.from(el.options)
+            .filter((o) => o.value && !o.disabled)
+            .map((o) => ({ value: o.value, text: clean(o.text) }));
+        }
+      }
+
+      // 목록 반복 항목(표의 행, 달력 날짜, 같은 형식의 상세 링크 등): 같은 그룹이면 대표 1개만 테스트한다.
+      // 그룹 = 같은 목록 안에서 같은 위치(열·순서)에 있는 같은 종류의 요소. 메뉴처럼 링크마다 목적지가 다르면 묶지 않는다.
+      let repeatKey = null;
+      if (!zone) {
+        const LIST = 'table, [role="table"], [role="grid"], ul, ol, [role="list"], [role="listbox"]';
+        const container = el.closest(LIST);
+        if (container) {
+          const sig = (n) =>
+            `${n.tagName}.${n.getAttribute('role') || ''}.${(typeof n.className === 'string' ? n.className : '')
+              .split(/\s+/)
+              .filter((c) => c && !/(active|select|current|today|disabled|focus|hover|open|checked|is-|--)/i.test(c))
+              .sort()
+              .join('.')}`;
+          const segs = [];
+          let repeats = false;
+          for (let n = el; n && n !== container; n = n.parentElement) {
+            const sibs = n.parentElement ? Array.from(n.parentElement.children) : [n];
+            const same = sibs.filter((s) => sig(s) === sig(n));
+            // 표의 칸(열)은 의미가 다르므로 위치를 유지, 그 외 반복 단위는 '*' 로 묶는다
+            const isCol = n.matches('td, th, [role="cell"], [role="columnheader"]');
+            if (!isCol && same.length >= 3) {
+              repeats = true;
+              segs.push(`${sig(n)}*`);
+            } else {
+              segs.push(`${sig(n)}:${sibs.indexOf(n)}`);
+            }
+          }
+          if (repeats) {
+            if (!container.dataset.qaList) container.dataset.qaList = String((window.__qaListSeq = (window.__qaListSeq || 0) + 1));
+            // 링크는 목적지 형식까지 같아야 같은 그룹 (/notice/1, /notice/2 는 같고 /a, /b 는 다름)
+            let dest = '';
+            if (href) {
+              try {
+                dest = new URL(href, location.href).pathname.replace(/\/(\d+|[0-9a-f]{8}-[0-9a-f-]{27,}|[0-9a-f]{24,})(?=\/|$)/gi, '/:id');
+              } catch {}
+            }
+            repeatKey = `${container.dataset.qaList}|${segs.join('/')}|${dest}`;
+          }
         }
       }
 
@@ -351,6 +396,8 @@ async function collectCandidates(page) {
         placeholder,
         formButton,
         option,
+        selectOptions,
+        repeatKey,
       });
     });
     return out;
@@ -451,7 +498,7 @@ function buildLocator(page, spec) {
 }
 
 /** 요소를 실제로 클릭해보고 어떤 동작이 일어나는지 관찰 */
-async function probe(page, spec, noisy) {
+async function probe(page, spec, noisy, reset) {
   const loc = buildLocator(page, spec);
 
   // 마우스 오버로 새로 나타나는 문구(툴팁/말풍선/호버 메뉴)
@@ -489,7 +536,9 @@ async function probe(page, spec, noisy) {
     }
   }
   const withTip = (effect) => (tooltip ? { ...effect, tooltip } : effect);
-  const effect = await probeClick(page, loc, spec, noisy);
+  let effect = await probeClick(page, loc, spec, noisy);
+  // 드롭다운이 열렸으면 옵션을 하나씩 눌러 동작 확인
+  if (effect.type === 'dropdownOpen') effect = reset ? await probeDropdownOptions(page, spec, effect, reset) : { type: 'none', dirty: true };
   return withTip(effect);
 }
 
@@ -508,10 +557,132 @@ const tableRowsOf = (loc) =>
 /** 문구가 화면의 한 요소로 실제로 찾아지는지 (표 한 줄을 이어 붙인 텍스트 같은 가짜 문구 제외) */
 const isVisibleText = async (page, t) => (await page.getByText(t).filter({ visible: true }).count().catch(() => 0)) > 0;
 
+/**
+ * 화면의 대표 목록(표·리스트 중 항목이 가장 많은 것)의 항목 문구. 검색·필터 결과 확인용.
+ * tests/support/site.ts 의 listRows 와 동일하게 유지.
+ */
+function listRowsInPage() {
+  const vis = (e) => {
+    const r = e.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && getComputedStyle(e).visibility !== 'hidden';
+  };
+  const clean = (t) => (t || '').trim().replace(/\s+/g, ' ');
+  const outside = (c) => !c.closest('header, nav, footer, aside, [role="navigation"], [role="banner"], [role="contentinfo"]');
+  const rowsOf = (c) => {
+    let items;
+    if (c.matches('table')) items = Array.from(c.querySelectorAll(':scope > tbody > tr, :scope > tr')).filter((r) => !r.querySelector('th'));
+    else if (c.matches('[role="table"], [role="grid"]')) items = Array.from(c.querySelectorAll('[role="row"]')).filter((r) => !r.querySelector('[role="columnheader"]'));
+    else items = Array.from(c.children).filter((n) => n.matches('li, [role="listitem"], [role="option"]'));
+    return items.filter(vis).map((n) => clean(n.innerText || n.textContent)).filter(Boolean);
+  };
+  // 머리글이 있는 데이터 표가 있으면 항상 그 표 (검색으로 행이 줄어도 같은 표를 본다)
+  const dataTable = Array.from(document.querySelectorAll('table, [role="table"], [role="grid"]')).find(
+    (t) => outside(t) && vis(t) && t.querySelector('th, [role="columnheader"]')
+  );
+  if (dataTable) return rowsOf(dataTable).slice(0, 100);
+  let best = [];
+  for (const c of document.querySelectorAll('ul, ol, [role="list"], [role="listbox"]')) {
+    if (!outside(c)) continue;
+    const texts = rowsOf(c);
+    if (texts.length > best.length) best = texts;
+  }
+  return best.slice(0, 100);
+}
+/**
+ * 표의 열 구성과 열마다의 값 형식. 값이 열과 맞게 나오는지(칸 수 · 날짜/시간/숫자 형식) 확인용.
+ * tests/support/site.ts 의 tableData 와 같은 기준으로 셀을 읽는다.
+ */
+function tableLayoutInPage(table) {
+  const clean = (t) => (t || '').trim().replace(/\s+/g, ' ');
+  const headRow = table.querySelector('thead tr') || table.querySelector('tr');
+  if (!headRow) return null;
+  const heads = Array.from(headRow.children).map((h) => clean(h.innerText));
+  const body = Array.from(table.querySelectorAll('tbody tr')).filter((r) => r !== headRow && r.children.length === heads.length);
+  const PLACEHOLDER = /^[-–—·]?$/;
+  const KINDS = [
+    ['date', /^\d{4}[-./]\d{1,2}[-./]\d{1,2}/],
+    ['time', /^\d{1,2}:\d{2}(:\d{2})?$/],
+    ['number', /^[-+]?[\d,]+(\.\d+)?\s*[가-힣%a-zA-Z]{0,3}$/],
+  ];
+  const cols = heads.map((name, i) => {
+    const vals = body.slice(0, 30).map((r) => clean(r.children[i].innerText)).filter((v) => !PLACEHOLDER.test(v));
+    const kind = vals.length ? (KINDS.find(([, re]) => vals.every((v) => re.test(v))) || ['text'])[0] : 'any';
+    return { name, kind };
+  });
+  const r = table.getBoundingClientRect();
+  return { heads, cols, rows: body.length, pos: { y: Math.round(r.top + scrollY), x: Math.round(r.left + scrollX) } };
+}
+
+/** 검색어로 쓸 값: 첫 항목에서 글자가 들어간 2~15자 단어 (실행 시점의 실제 데이터) */
+const pickTerm = (row) => (row || '').split(/\s+/).find((w) => w.length >= 2 && w.length <= 15 && /[가-힣A-Za-z]/.test(w) && !/[()[\]{}|]/.test(w)) || null;
+const NONE_TERM = 'zzqx없는검색어9';
+const EMPTY_RE = /없|no (result|data|match)|not found|empty/i;
+const SEARCH_HINT = /검색|search|찾기|조회|filter|필터/i;
+const OPTION_SEL = '[role="option"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"]';
+
+/** 검색창: 목록의 실제 값으로 검색 → 결과가 그 값만 남는지, 없는 값 검색 → 결과 없음인지 */
+async function probeSearch(page, loc) {
+  const before = await page.evaluate(listRowsInPage).catch(() => []);
+  if (before.length < 2) return null;
+  const term = pickTerm(before[0]);
+  if (!term) return null;
+  const ok = await loc.fill(term).then(() => true).catch(() => false);
+  if (!ok) return null;
+  await loc.press('Enter').catch(() => {});
+  await page.waitForTimeout(1500);
+  const after = await page.evaluate(listRowsInPage).catch(() => []);
+  if (!(after.length > 0 && after.every((r) => r.includes(term)))) return null;
+  let noneEmpty = false;
+  if (await loc.fill(NONE_TERM).then(() => true).catch(() => false)) {
+    await loc.press('Enter').catch(() => {});
+    await page.waitForTimeout(1500);
+    const none = await page.evaluate(listRowsInPage).catch(() => null);
+    noneEmpty = !!none && (none.length === 0 || none.every((r) => EMPTY_RE.test(r)));
+  }
+  return { type: 'search', noneEmpty, dirty: true };
+}
+
+/** 열린 드롭다운의 옵션을 하나씩 눌러 결과(선택 값 표시 · 목록 필터 · 페이지 이동)를 관찰 */
+async function probeDropdownOptions(page, spec, opened, reset) {
+  // 옵션이 많으면(연도 선택 등) 고르게 최대 8개
+  const names = opened.names.length <= 8 ? opened.names : Array.from({ length: 8 }, (_, i) => opened.names[Math.round((i * (opened.names.length - 1)) / 7)]);
+  const options = [];
+  for (const name of [...new Set(names)]) {
+    if (RISKY.test(name)) {
+      options.push({ name, effect: 'skip' });
+      continue;
+    }
+    await reset();
+    const trigger = buildLocator(page, spec);
+    const urlBefore = page.url();
+    const listBefore = (await page.evaluate(listRowsInPage).catch(() => [])).join('|');
+    const textBefore = await trigger.innerText({ timeout: 2000 }).catch(() => '');
+    if (!(await trigger.click({ timeout: 5000 }).then(() => true).catch(() => false))) break;
+    await page.waitForTimeout(500);
+    const opt = page.getByRole(opened.role, { name, exact: true }).filter({ visible: true }).first();
+    if (!(await opt.click({ timeout: 3000 }).then(() => true).catch(() => false))) {
+      options.push({ name, effect: 'unclickable' });
+      continue;
+    }
+    await page.waitForTimeout(1200);
+    if (stripHash(page.url()) !== stripHash(urlBefore) && /^https?:/.test(page.url())) {
+      options.push({ name, effect: 'navigate', url: page.url() });
+      continue;
+    }
+    const textAfter = await trigger.innerText({ timeout: 1000 }).catch(() => '');
+    const listAfter = (await page.evaluate(listRowsInPage).catch(() => [])).join('|');
+    if (textAfter !== textBefore && textAfter.includes(name)) options.push({ name, effect: 'selected' });
+    else if (listAfter !== listBefore) options.push({ name, effect: 'filtered' });
+    else options.push({ name, effect: 'none' });
+  }
+  return { type: 'dropdown', optionRole: opened.role, options, dirty: true };
+}
+
 async function probeClick(page, loc, spec, noisy) {
   const before = await pageState(page);
   const expandedBefore = await loc.getAttribute('aria-expanded', { timeout: 1000 }).catch(() => null);
   const rowsBefore = await tableRowsOf(loc);
+  const optionsBefore = await page.locator(OPTION_SEL).filter({ visible: true }).count().catch(() => 0);
 
   let popup = null;
   const onPopup = (p) => (popup = p);
@@ -539,6 +710,17 @@ async function probeClick(page, loc, spec, noisy) {
     // 직접 연 페이지에서 '뒤로가기' 등은 about:blank 로 간다 → 테스트로 재현할 의미가 없음
     if (!/^https?:/.test(page.url())) return { type: 'none', dirty: true };
     return { type: 'navigate', url: page.url(), dirty: true };
+  }
+
+  // 드롭다운/메뉴: 클릭 후 옵션(option · menuitem)이 새로 나타났으면 옵션 목록을 기록 (옵션별 동작은 probe 에서 확인)
+  const optionLoc = page.locator(OPTION_SEL).filter({ visible: true });
+  if ((await optionLoc.count().catch(() => 0)) > optionsBefore) {
+    const opts = await optionLoc
+      .evaluateAll((els) => els.map((e) => ({ role: e.getAttribute('role'), name: (e.getAttribute('aria-label') || e.innerText || '').trim().replace(/\s+/g, ' ') })))
+      .catch(() => []);
+    const role = (opts[0] && opts[0].role) || 'option';
+    const names = opts.filter((o) => o.role === role && o.name && o.name.length <= 40).map((o) => o.name);
+    if (names.length) return { type: 'dropdownOpen', role, names, dirty: true };
   }
 
   const after = await pageState(page);
@@ -649,6 +831,14 @@ async function collectScreenItems(page) {
       if (/^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|OPTION)$/.test(el.tagName)) continue;
       // 클릭 요소 안의 문구/이미지는 그 요소의 '문구' 검사에서 확인한다
       if (el.closest(selector)) continue;
+      // 표의 데이터 행은 실제 데이터라 계속 바뀌므로 문구로 확인하지 않는다 (표 구조 확인으로 대신)
+      if (el.closest('tbody tr, [role="row"]') && !el.closest('thead, [role="columnheader"]')) continue;
+      // 반복 목록(같은 형식 항목 3개 이상)은 첫 항목의 문구만 대표로 확인
+      const item = el.closest('li, [role="listitem"]');
+      if (item && item.parentElement) {
+        const sibs = Array.from(item.parentElement.children).filter((s) => s.tagName === item.tagName);
+        if (sibs.length >= 3 && sibs[0] !== item) continue;
+      }
       // 닫힌 모달·숨김 영역은 클릭 탐지(모달 노출)에서 다룬다
       if (el.closest('[aria-hidden="true"], [role="dialog"], dialog, [role="tooltip"]')) continue;
       if (el.matches('img, [role="img"]')) {
@@ -854,7 +1044,9 @@ async function analyzePage(newContext, pagePath, { commonSignatures, collectComm
       if (!(await t.isVisible())) continue;
       const columns = await t.getByRole('columnheader').count();
       const rows = await t.getByRole('row').count();
-      if (rows > 0) result.tables.push({ nth: i, columns, rows });
+      // 열 이름과 열마다의 값 형식(날짜 · 시간 · 숫자 · 글자) → '표 데이터 형식' 케이스
+      const layout = await t.evaluate(tableLayoutInPage).catch(() => null);
+      if (rows > 0) result.tables.push({ nth: i, columns, rows, ...(layout && layout.heads.length >= 2 && layout.rows >= 1 ? { layout } : {}) });
     }
 
     // 화면 구조로 페이지 유형 판별 (URL 규칙이 아니라 실제 구성 요소 기준)
@@ -931,6 +1123,23 @@ async function analyzePage(newContext, pagePath, { commonSignatures, collectComm
     result.rolling = rolling;
     step(`일반 문구 ${result.texts.length}개 · 이미지 ${result.images.length}개${rolling.length ? ` · 롤링 배너 ${rolling.length}개 (문구 ${rollingTexts.size}개)` : ''} 수집`);
 
+    // 목록 반복 항목(표의 행 버튼, 달력 날짜, 같은 형식의 상세 링크 등)은 대표 1개만 테스트한다
+    const repeatGroups = new Map();
+    for (const r of resolved) {
+      if (!r.cand.repeatKey) continue;
+      if (!repeatGroups.has(r.cand.repeatKey)) repeatGroups.set(r.cand.repeatKey, []);
+      repeatGroups.get(r.cand.repeatKey).push(r);
+    }
+    const dropped = new Set();
+    for (const g of repeatGroups.values()) {
+      if (g.length < 3) continue;
+      g[0].repeatCount = g.length;
+      g.slice(1).forEach((r) => dropped.add(r));
+      result.skipped.push({ reason: `목록 반복 항목: 같은 유형 ${g.length}개 중 대표 1개만 확인`, name: g[0].spec.name || g[0].cand.href });
+    }
+    for (let i = resolved.length - 1; i >= 0; i--) if (dropped.has(resolved[i])) resolved.splice(i, 1);
+    if (dropped.size) step(`목록 반복 항목 ${dropped.size + [...repeatGroups.values()].filter((g) => g.length >= 3).length}개 → 같은 유형끼리 묶어 대표 ${[...repeatGroups.values()].filter((g) => g.length >= 3).length}개만 확인`);
+
     // 페이지당 탐지 개수 제한이 있으므로 상호작용 컴포넌트(버튼/토글/탭)를 링크보다 먼저 탐지한다
     const priority = ({ cand, spec }) => (cand.tag === 'a' || spec.role === 'link' ? 1 : 0);
     resolved.sort((a, b) => priority(a) - priority(b));
@@ -941,7 +1150,7 @@ async function analyzePage(newContext, pagePath, { commonSignatures, collectComm
 
     const probedBy = { features: 0, common: 0 };
     let n = 0;
-    for (const { cand, spec, signature, bucket, risky } of resolved) {
+    for (const { cand, spec, signature, bucket, risky, repeatCount } of resolved) {
       n++;
       const label = spec.name || cand.href || spec.selector || spec.role;
       // 숫자만 있는 줄(알림 수 · 건수 · 금액 등)은 시간이 지나면 바뀌므로 문구 확인에서 뺀다
@@ -949,7 +1158,7 @@ async function analyzePage(newContext, pagePath, { commonSignatures, collectComm
         .filter((t) => !noisy.has(t) && !/^[\d\s.,:%+\-$₩()/]+$/.test(t))
         // 이름 끝 숫자 배지가 있는 요소(… 1)는 문구 확인에서도 숫자를 뺀다
         .map((t) => (spec.kind === 'roleBadge' ? t.replace(/\s+\d+\+?$/, '') : t));
-      const base = { label, signature, locator: spec, href: cand.href, kind: kindOf(cand, spec), lines, hasImg: cand.hasImg, pos: cand.pos };
+      const base = { label, signature, locator: spec, href: cand.href, kind: kindOf(cand, spec), lines, hasImg: cand.hasImg, pos: cand.pos, ...(repeatCount ? { repeatCount } : {}) };
       const before = result[bucket].length;
       const where = collectCommon && bucket === 'common' ? '공통 ' : '';
       const report = (how) => {
@@ -969,13 +1178,26 @@ async function analyzePage(newContext, pagePath, { commonSignatures, collectComm
         continue;
       }
       if (cand.tag === 'select') {
-        if (cand.option) result[bucket].push({ ...base, type: 'select', value: cand.option });
-        report('옵션 확인');
+        // 옵션을 하나씩 선택해 본다 (많으면 고르게 최대 8개)
+        const all = cand.selectOptions || [];
+        const options = all.length <= 8 ? all : Array.from({ length: 8 }, (_, i) => all[Math.round((i * (all.length - 1)) / 7)]);
+        if (options.length) result[bucket].push({ ...base, type: 'select', value: options[0].value, options });
+        report(`옵션 ${options.length}개 확인`);
         continue;
       }
       if (['textbox', 'searchbox', 'spinbutton'].includes(spec.role) || cand.tag === 'textarea') {
-        result[bucket].push({ ...base, type: 'input', inputType: cand.type || 'text', formButton: cand.formButton });
-        report('입력 확인');
+        // 검색창이면 목록의 실제 값으로 검색해 결과가 맞게 걸러지는지까지 확인
+        const isSearch = spec.role === 'searchbox' || cand.type === 'search' || SEARCH_HINT.test(`${spec.name} ${cand.label} ${cand.placeholder}`);
+        const searched = isSearch ? await probeSearch(page, buildLocator(page, spec)) : null;
+        if (searched) {
+          result[bucket].push({ ...base, ...searched });
+          await resetState();
+          report('검색 확인');
+        } else {
+          if (isSearch) await resetState();
+          result[bucket].push({ ...base, type: 'input', inputType: cand.type || 'text', formButton: cand.formButton });
+          report('입력 확인');
+        }
         continue;
       }
       if (['checkbox', 'radio', 'switch'].includes(spec.role)) {
@@ -997,7 +1219,7 @@ async function analyzePage(newContext, pagePath, { commonSignatures, collectComm
       }
       probedBy[bucket]++;
 
-      const effect = await probe(page, spec, noisy);
+      const effect = await probe(page, spec, noisy, resetState);
       if (effect.type === 'unclickable') {
         // 클릭은 안 되더라도 화면에 있는 요소이므로 노출·문구는 확인한다
         result[bucket].push({ ...base, type: 'display', reason: `분석 중 클릭 불가: ${short(effect.reason, 60)}`, ...(effect.tooltip ? { tooltip: effect.tooltip } : {}) });
@@ -1039,6 +1261,8 @@ const TYPE_LABEL = {
   brokenLink: '깨진 링크',
   select: '선택 박스',
   anchor: '목차/앵커 이동',
+  search: '검색',
+  dropdown: '드롭다운 옵션',
   sort: '표 정렬',
   display: '노출·문구만 확인',
 };
@@ -1150,7 +1374,8 @@ function elementTest(f, no, typos) {
   const out = [];
   // 제목은 화면에 보이는 문구 우선 (이미지 대체텍스트가 섞인 접근성 이름보다 알아보기 쉽다)
   const shownName = f.lines && f.lines.length ? f.lines.join(' ') : f.label;
-  out.push(`  test(${JSON.stringify(`${num(no)}. ${f.kind} "${q(shownName)}" (${f.id})`)}, async ({ page }) => {`);
+  const rep = f.repeatCount ? ` · 목록 ${f.repeatCount}개 중 대표` : '';
+  out.push(`  test(${JSON.stringify(`${num(no)}. ${f.kind} "${q(shownName)}"${rep} (${f.id})`)}, async ({ page }) => {`);
   out.push(`    const { errors } = await openPage(page, TARGET_URL);`);
   out.push(`    const target = ${locatorCode(f.locator)};`);
   out.push(`    const c = checks();`);
@@ -1176,6 +1401,61 @@ function elementTest(f, no, typos) {
   }
   if (f.type === 'display') {
     out.push(`    c.skip('동작', ${JSON.stringify(f.reason || '클릭 확인 생략')});`);
+  } else if (f.type === 'select') {
+    // 선택 박스: 옵션을 하나씩 선택
+    for (const o of f.options) {
+      out.push(`    await c.run(${JSON.stringify(`동작: 옵션 "${q(o.text || o.value, 25)}" 선택`)}, async () => {`);
+      out.push(`      await target.selectOption(${JSON.stringify(o.value)});`);
+      out.push(`      await expect(target).toHaveValue(${JSON.stringify(o.value)});`);
+      out.push(`    });`);
+    }
+  } else if (f.type === 'dropdown') {
+    // 드롭다운: 매번 처음 상태에서 열고 옵션 하나를 눌러 결과 확인
+    const EFFECT = { navigate: '페이지 이동', selected: '선택 값 표시', filtered: '목록 변경', none: '오류 없음' };
+    for (const o of f.options) {
+      const name = `동작: 옵션 "${q(o.name, 25)}" 선택 → ${EFFECT[o.effect] || ''}`;
+      if (o.effect === 'skip') {
+        out.push(`    c.skip(${JSON.stringify(`동작: 옵션 "${q(o.name, 25)}" 선택`)}, ${JSON.stringify(RISKY_REASON)});`);
+        continue;
+      }
+      if (o.effect === 'unclickable') {
+        out.push(`    c.skip(${JSON.stringify(`동작: 옵션 "${q(o.name, 25)}" 선택`)}, '분석 중 옵션을 누를 수 없었음');`);
+        continue;
+      }
+      out.push(`    await c.run(${JSON.stringify(name)}, async () => {`);
+      out.push(`      await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded' });`);
+      out.push(`      await page.waitForTimeout(1200);`);
+      out.push(`      const listBefore = (await listRows(page)).join('|');`);
+      out.push(`      await target.click();`);
+      out.push(`      await page.getByRole(${JSON.stringify(f.optionRole)}, { name: ${JSON.stringify(o.name)}, exact: true }).filter({ visible: true }).first().click();`);
+      if (o.effect === 'navigate') {
+        out.push(`      await expect(page).toHaveURL(${urlMatcher(o.url, new URL(o.url).origin !== BASE_URL)});`);
+      } else if (o.effect === 'selected') {
+        out.push(`      await expect(target).toContainText(${JSON.stringify(o.name)});`);
+      } else if (o.effect === 'filtered') {
+        out.push(`      await expect.poll(async () => (await listRows(page)).join('|'), { message: '옵션을 골라도 목록이 바뀌지 않음' }).not.toBe(listBefore);`);
+      } else {
+        out.push(`      await page.waitForTimeout(500);`);
+        out.push(`      expect(errors, '옵션 선택 후 JS 런타임 오류').toEqual([]);`);
+      }
+      out.push(`    });`);
+    }
+  } else if (f.type === 'search') {
+    // 검색창: 실행 시점 목록의 실제 값으로 검색 → 결과가 그 값만 남는지 / 없는 값 → 결과 없음
+    out.push(`    await c.run('동작: 목록에 있는 값으로 검색 → 그 값만 표시', async () => {`);
+    out.push(`      const term = pickTerm((await listRows(page))[0]);`);
+    out.push(`      expect(term, '검색해 볼 목록 데이터가 없음').toBeTruthy();`);
+    out.push(`      await target.fill(term!);`);
+    out.push(`      await target.press('Enter');`);
+    out.push(`      await expect.poll(async () => { const r = await listRows(page); return r.length > 0 && r.every((t) => t.includes(term!)); }, { message: \`"\${term}" 검색 결과가 없거나 다른 항목이 섞여 있음\` }).toBe(true);`);
+    out.push(`    });`);
+    if (f.noneEmpty) {
+      out.push(`    await c.run('동작: 없는 값으로 검색 → 결과 없음', async () => {`);
+      out.push(`      await target.fill(${JSON.stringify(NONE_TERM)});`);
+      out.push(`      await target.press('Enter');`);
+      out.push(`      await expect.poll(async () => { const r = await listRows(page); return r.length === 0 || r.every((t) => ${EMPTY_RE.toString()}.test(t)); }, { message: '없는 값을 검색했는데 결과가 나옴' }).toBe(true);`);
+      out.push(`    });`);
+    }
   } else {
     const { action, body } = actionCode(f);
     out.push(`    await c.run(${JSON.stringify(`동작: ${action}`)}, async () => {`);
@@ -1211,6 +1491,37 @@ function contentTest(items, no, typos) {
       out.push(`    });`);
     }
   }
+  out.push(`    c.done();`);
+  out.push(`  });`);
+  return out;
+}
+
+/** 표 데이터 형식: 열 구성 · 모든 행의 칸 수 · 열마다 값 형식(날짜/시간/숫자)이 맞는지 */
+function tableTest(t, no) {
+  const { heads, cols } = t.layout;
+  const KIND = {
+    date: ['날짜', String.raw`^\d{4}[-./]\d{1,2}[-./]\d{1,2}`],
+    time: ['시간', String.raw`^\d{1,2}:\d{2}(:\d{2})?$`],
+    number: ['숫자', String.raw`^[-+]?[\d,]+(\.\d+)?\s*[가-힣%a-zA-Z]{0,3}$`],
+  };
+  const out = [];
+  out.push(`  test(${JSON.stringify(`${num(no)}. 표 데이터 형식 "${q(heads.join(' · '), 40)}"`)}, async ({ page }) => {`);
+  out.push(`    await openPage(page, TARGET_URL);`);
+  out.push(`    const data = await tableData(page.getByRole('table').nth(${t.nth}));`);
+  out.push(`    const c = checks();`);
+  out.push(`    await c.run(${JSON.stringify(`열 구성: ${heads.join(' · ')}`)}, async () => { expect(data.heads).toEqual(${JSON.stringify(heads)}); }, { gate: true });`);
+  out.push(`    await c.run(${JSON.stringify(`모든 행의 칸 수 = 열 ${heads.length}개`)}, async () => {`);
+  out.push(`      const bad = data.rows.filter((r) => r.length !== ${heads.length} && r.length > 1).map((r) => r.join(' | '));`);
+  out.push(`      expect(bad, '열 개수와 칸 수가 다른 행').toEqual([]);`);
+  out.push(`    });`);
+  cols.forEach((col, i) => {
+    if (!KIND[col.kind]) return;
+    const [label, re] = KIND[col.kind];
+    out.push(`    await c.run(${JSON.stringify(`"${q(col.name, 15)}" 열 = ${label} 형식`)}, async () => {`);
+    out.push(`      const bad = data.rows.filter((r) => r.length === ${heads.length}).map((r) => r[${i}]).filter((v) => !/^[-–—·]?$/.test(v) && !new RegExp(${JSON.stringify(re)}).test(v));`);
+    out.push(`      expect(bad, ${JSON.stringify(`"${col.name}" 열에 ${label} 형식이 아닌 값`)}).toEqual([]);`);
+    out.push(`    });`);
+  });
   out.push(`    c.done();`);
   out.push(`  });`);
   return out;
@@ -1277,6 +1588,8 @@ function specSource({ describeTitle, page, features, typos }) {
     ...page.texts.map((t) => ({ kind: 'text', text: t.text, pos: t.pos })),
     ...page.images.map((i) => ({ kind: 'image', name: i.name, pos: i.pos })),
     ...page.rolling.map((g) => ({ kind: 'rolling', g, pos: g.pos })),
+    // 표: 머리글 바로 아래 순서에 '표 데이터 형식' 케이스
+    ...(page.tables || []).filter((t) => t.layout).map((t) => ({ kind: 'table', t, pos: { y: t.layout.pos.y + 1, x: t.layout.pos.x } })),
   ].sort((a, b) => a.pos.y - b.pos.y || a.pos.x - b.pos.x);
 
   let no = 0;
@@ -1293,7 +1606,8 @@ function specSource({ describeTitle, page, features, typos }) {
       continue;
     }
     flush();
-    out.push(``, ...(it.kind === 'element' ? elementTest(it.f, ++no, typos) : rollingTest(it.g, ++no, typos)));
+    const build = { element: () => elementTest(it.f, ++no, typos), rolling: () => rollingTest(it.g, ++no, typos), table: () => tableTest(it.t, ++no) }[it.kind];
+    out.push(``, ...build());
   }
   flush();
 

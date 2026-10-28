@@ -94,6 +94,13 @@ function describeAction(action, target) {
     [/^목차 이동 → (.+)$/, (m) => [`${target} 클릭`, `${m[1]} 위치로 이동`]],
     [/^탭 전환$/, () => [`${target} 클릭`, '해당 탭이 선택됨']],
     [/^표 정렬$/, () => [`${target} 클릭`, '표의 행 순서가 그 기준으로 정렬됨']],
+    [/^옵션 "(.*)" 선택 → 페이지 이동$/, (m) => [`${target} 열고 "${m[1]}" 선택`, '해당 페이지로 이동']],
+    [/^옵션 "(.*)" 선택 → 선택 값 표시$/, (m) => [`${target} 열고 "${m[1]}" 선택`, `"${m[1]}" 이(가) 선택 값으로 표시됨`]],
+    [/^옵션 "(.*)" 선택 → 목록 변경$/, (m) => [`${target} 열고 "${m[1]}" 선택`, '목록이 그 조건으로 바뀜']],
+    [/^옵션 "(.*)" 선택 → 오류 없음$/, (m) => [`${target} 열고 "${m[1]}" 선택`, '오류 없이 동작']],
+    [/^옵션 "(.*)" 선택$/, (m) => [`${target}에서 "${m[1]}" 선택`, `"${m[1]}" 선택됨`]],
+    [/^목록에 있는 값으로 검색/, () => [`${target}에 목록의 실제 값 입력 후 Enter`, '그 값이 들어간 항목만 표시']],
+    [/^없는 값으로 검색/, () => [`${target}에 목록에 없는 값 입력 후 Enter`, '검색 결과 없음']],
     [/^입력 → "(.*)" 버튼 활성화$/, (m) => [`${target}에 값 입력`, `입력값 반영, "${m[1]}" 버튼 활성화`]],
     [/^입력$/, () => [`${target}에 값 입력`, '입력값 반영']],
     [/^선택\(체크\)$/, () => [`${target} 체크`, '체크됨']],
@@ -128,6 +135,10 @@ function describeCheck(check, info) {
   if (name === '이미지 정상 로드') return { small: '이미지', step: '페이지 끝까지 스크롤', expected: '깨진 이미지 없음' };
   if (name === 'JS 런타임 오류 없음') return { small: '스크립트', step: '페이지 접속', expected: 'JS 런타임 오류 없음' };
   if (name.startsWith('표 구조:')) return { small: '표', step: '화면의 표 확인', expected: name.replace(/^표 구조:\s*/, '') };
+  if (name.startsWith('열 구성:')) return { small: '열 구성', step: '표의 머리글 확인', expected: `열이 ${name.replace(/^열 구성:\s*/, '')} 순서로 표시` };
+  if (name.startsWith('모든 행의 칸 수')) return { small: '칸 수', step: '표의 모든 행 확인', expected: `모든 행이 ${name.replace(/^.*= /, '')}의 칸을 가짐 (밀리거나 빠진 칸 없음)` };
+  let m;
+  if ((m = name.match(/^"(.*)" 열 = (.+) 형식$/))) return { small: '열 형식', step: `표의 "${m[1]}" 열 값 확인`, expected: `모든 값이 ${m[2]} 형식` };
   if (name.startsWith('봇 차단')) return { small: '접속', step: '페이지 접속', expected: '봇 차단/보안 확인 화면이 아님' };
   return { small: name, step: '', expected: '' };
 }

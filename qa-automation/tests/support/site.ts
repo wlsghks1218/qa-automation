@@ -132,3 +132,57 @@ export async function expectShownInRotation(page: Page, text: string, timeout = 
     )
     .toBe(true);
 }
+
+/**
+ * 화면의 대표 목록(표·리스트 중 항목이 가장 많은 것)의 항목 문구. 검색·필터 결과 확인용.
+ * (scripts/generate-specs.js 의 listRowsInPage 와 동일하게 유지)
+ */
+export async function listRows(page: Page): Promise<string[]> {
+  return page
+    .evaluate(() => {
+      const vis = (e: Element) => {
+        const r = e.getBoundingClientRect();
+        return r.width > 0 && r.height > 0 && getComputedStyle(e).visibility !== 'hidden';
+      };
+      const clean = (t: string | null) => (t || '').trim().replace(/\s+/g, ' ');
+      const outside = (c: Element) => !c.closest('header, nav, footer, aside, [role="navigation"], [role="banner"], [role="contentinfo"]');
+      const rowsOf = (c: Element) => {
+        let items: Element[];
+        if (c.matches('table')) items = Array.from(c.querySelectorAll(':scope > tbody > tr, :scope > tr')).filter((r) => !r.querySelector('th'));
+        else if (c.matches('[role="table"], [role="grid"]')) items = Array.from(c.querySelectorAll('[role="row"]')).filter((r) => !r.querySelector('[role="columnheader"]'));
+        else items = Array.from(c.children).filter((n) => n.matches('li, [role="listitem"], [role="option"]'));
+        return items.filter(vis).map((n) => clean((n as HTMLElement).innerText || n.textContent)).filter(Boolean);
+      };
+      // 머리글이 있는 데이터 표가 있으면 항상 그 표 (검색으로 행이 줄어도 같은 표를 본다)
+      const dataTable = Array.from(document.querySelectorAll('table, [role="table"], [role="grid"]')).find(
+        (t) => outside(t) && vis(t) && t.querySelector('th, [role="columnheader"]')
+      );
+      if (dataTable) return rowsOf(dataTable).slice(0, 100);
+      let best: string[] = [];
+      for (const c of Array.from(document.querySelectorAll('ul, ol, [role="list"], [role="listbox"]'))) {
+        if (!outside(c)) continue;
+        const texts = rowsOf(c);
+        if (texts.length > best.length) best = texts;
+      }
+      return best.slice(0, 100);
+    })
+    .catch(() => []);
+}
+
+/** 검색어로 쓸 값: 첫 항목에서 글자가 들어간 2~15자 단어 (실행 시점의 실제 데이터) */
+export function pickTerm(row: string | undefined): string | null {
+  return (row || '').split(/\s+/).find((w) => w.length >= 2 && w.length <= 15 && /[가-힣A-Za-z]/.test(w) && !/[()[\]{}|]/.test(w)) || null;
+}
+
+/** 표의 머리글과 본문 행의 칸 값 (표 데이터 형식 확인용, generate-specs.js 의 tableLayoutInPage 와 같은 기준) */
+export async function tableData(table: import('@playwright/test').Locator): Promise<{ heads: string[]; rows: string[][] }> {
+  return table.evaluate((t) => {
+    const clean = (s: string) => (s || '').trim().replace(/\s+/g, ' ');
+    const headRow = t.querySelector('thead tr') || t.querySelector('tr');
+    const heads = headRow ? Array.from(headRow.children).map((h) => clean((h as HTMLElement).innerText)) : [];
+    const rows = Array.from(t.querySelectorAll('tbody tr'))
+      .filter((r) => r !== headRow)
+      .map((r) => Array.from(r.children).map((c) => clean((c as HTMLElement).innerText)));
+    return { heads, rows };
+  });
+}
