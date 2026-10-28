@@ -106,7 +106,25 @@ function pickFolderWin(initial) {
   });
 }
 
-const state = { running: false, phase: '', logs: [], result: null };
+const state = { running: false, phase: '', logs: [], result: null, child: null, stopRequested: false };
+
+/** 실행 중인 자식 프로세스와 그 아래 브라우저·워커까지 모두 종료 */
+function killTree(child) {
+  if (!child || child.exitCode !== null) return;
+  if (process.platform === 'win32') spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true });
+  else {
+    try {
+      process.kill(-child.pid, 'SIGKILL');
+    } catch {
+      child.kill('SIGKILL');
+    }
+  }
+}
+
+/** 중지 버튼을 눌렀으면 다음 단계로 넘어가지 않는다 */
+function checkStop() {
+  if (state.stopRequested) throw new Error('사용자가 테스트를 중지했습니다.');
+}
 const clients = new Set();
 let lastSeen = Date.now();
 
@@ -141,7 +159,11 @@ function runNode(args, env = {}) {
     const child = spawn(process.execPath, args, {
       cwd: WORKSPACE,
       env: { ...process.env, ...env, ELECTRON_RUN_AS_NODE: '1', FORCE_COLOR: '0' },
+      // macOS/Linux: 중지할 때 프로세스 그룹째 종료할 수 있도록 별도 그룹으로 실행
+      detached: process.platform !== 'win32',
+      windowsHide: true,
     });
+    state.child = child;
     const pipe = (stream) => {
       let buf = '';
       stream.on('data', (chunk) => {
@@ -154,7 +176,10 @@ function runNode(args, env = {}) {
     };
     pipe(child.stdout);
     pipe(child.stderr);
-    child.on('close', (code) => resolve(code));
+    child.on('close', (code) => {
+      if (state.child === child) state.child = null;
+      resolve(code);
+    });
   });
 }
 
@@ -327,13 +352,14 @@ function attachDocResults(doc, mappings, tests, group) {
   };
 }
 
-async function runJob({ url, scope, file, mode, browsers, useLogin }) {
+async function runJob({ url, scope, file, mode, browsers, useLogin, clickAll }) {
   const id = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const runDir = path.join(settings.resultsDir, id);
   fs.mkdirSync(runDir, { recursive: true });
   runDirs.set(id, runDir);
 
   state.running = true;
+  state.stopRequested = false;
   state.logs = [];
   state.result = null;
   broadcast('start', { id });
@@ -362,6 +388,7 @@ async function runJob({ url, scope, file, mode, browsers, useLogin }) {
         result.errors.push(`기획서 분석 실패: ${e.message}`);
         log(`[기획서] 실패: ${e.message}`);
       }
+      checkStop();
     }
 
     if (url) {
@@ -375,7 +402,13 @@ async function runJob({ url, scope, file, mode, browsers, useLogin }) {
         result.loggedIn = true;
         log(`[로그인] ${new URL(url).host} 저장된 로그인 상태로 테스트합니다 (안전 모드).`);
       }
-      const genCode = await runNode([GENERATOR, url, `--scope=${crawlScope}`], { QA_OUTPUT_DIR: GENERATED_DIR, ...loginEnv });
+      // 전체 동작 확인: 저장·등록·제출·삭제 등 데이터가 바뀌는 버튼도 실제로 누른다 (탈퇴·결제·송금·로그아웃 제외)
+      if (clickAll) {
+        result.clickAll = true;
+        log('[동작 확인] 전체 동작 확인: 데이터가 바뀌는 버튼도 실제로 누릅니다 (탈퇴·결제·송금·로그아웃 제외).');
+      }
+      const genCode = await runNode([GENERATOR, url, `--scope=${crawlScope}`], { QA_OUTPUT_DIR: GENERATED_DIR, ...loginEnv, ...(clickAll ? { QA_CLICK_ALL: '1' } : {}) });
+      checkStop();
       if (genCode !== 0) throw new Error('사이트 분석에 실패했습니다. 로그를 확인해주세요.');
 
       const analysisPath = path.join(GENERATED_DIR, 'analysis.json');
@@ -410,6 +443,7 @@ async function runJob({ url, scope, file, mode, browsers, useLogin }) {
           result.errors.push(`기획서 매핑 실패: ${e.message}`);
           log(`[매핑] 실패: ${e.message}`);
         }
+        checkStop();
       }
 
       // 3-1) AI 테스트: 페이지 스크린샷 + 화면 요소 → AI 가 기대 동작 기준 TC 작성 + 화면 이슈 보고
@@ -426,6 +460,7 @@ async function runJob({ url, scope, file, mode, browsers, useLogin }) {
           result.errors.push(`AI 분석 실패: ${e.message}`);
           log(`[AI 분석] 실패: ${e.message}`);
         }
+        checkStop();
       }
 
       // 4) 실행. '입력한(첨부한) 사이트(PDF)만' + 기획서면 기획서 기반 테스트만 실행
@@ -441,13 +476,15 @@ async function runJob({ url, scope, file, mode, browsers, useLogin }) {
         PLAYWRIGHT_HTML_OPEN: 'never',
         ...loginEnv,
       });
+      checkStop();
       result.tests = summarizeReport(path.join(runDir, 'results.json'));
       if (!result.tests) throw new Error('테스트 결과를 찾을 수 없습니다.');
       result.reportUrl = `/results/${id}/report/index.html`;
     }
   } catch (e) {
     result.errors.push(e.message);
-    log(`[오류] ${e.message}`);
+    if (state.stopRequested) result.stopped = true;
+    log(`${state.stopRequested ? '[중지]' : '[오류]'} ${e.message}`);
   } finally {
     if (result.ai) {
       attachDocResults(result.ai.doc, aiMappings, result.tests, 'AI 분석');
@@ -646,6 +683,15 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    if (req.method === 'POST' && pathname === '/api/stop') {
+      if (!state.running) return json(res, 400, { error: '실행 중인 테스트가 없습니다.' });
+      state.stopRequested = true;
+      setPhase('중지하는 중…');
+      log('[중지] 사용자가 중지를 요청했습니다. 실행 중인 분석·테스트와 브라우저를 종료합니다.');
+      killTree(state.child);
+      return json(res, 200, { ok: true });
+    }
+
     if (req.method === 'POST' && pathname === '/api/run') {
       if (state.running) return json(res, 409, { error: '이미 실행 중인 작업이 있습니다.' });
       const body = await readJson(req);
@@ -667,7 +713,7 @@ const server = http.createServer(async (req, res) => {
         }
       }
       if (loginSession) return json(res, 409, { error: '로그인 창이 열려 있습니다. 로그인을 끝내고 "로그인 완료"를 누르거나 취소해주세요.' });
-      runJob({ url, scope, mode, browsers, file: body.file || null, useLogin: body.useLogin !== false });
+      runJob({ url, scope, mode, browsers, file: body.file || null, useLogin: body.useLogin !== false, clickAll: body.clickAll === true });
       return json(res, 202, { ok: true });
     }
 

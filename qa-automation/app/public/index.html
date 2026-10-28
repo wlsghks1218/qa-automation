@@ -132,6 +132,8 @@
   .progress { display: none; }
   .progress.show { display: block; }
   .phase { display: flex; align-items: center; gap: 10px; font-weight: 600; }
+  .stop-btn { margin-left: auto; color: var(--fail); border-color: var(--fail); }
+  .stop-btn:disabled { opacity: .6; cursor: default; }
   .spinner { width: 16px; height: 16px; border: 2px solid var(--accent-weak); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .elapsed { color: var(--muted); font-weight: 400; font-size: 13px; }
@@ -360,6 +362,11 @@
     </div>
 
     <div class="field">
+      <span class="label">동작 확인 범위</span>
+      <label class="login-use" style="margin-top:0"><input type="checkbox" id="clickAll"> <b>전체 동작 확인</b> <span class="hint">· 저장·등록·제출·출근·삭제 버튼까지 실제로 눌러 확인합니다. 실제 데이터가 바뀌므로 테스트 계정·테스트 서버에서만 켜주세요. 탈퇴·결제·송금·로그아웃은 항상 누르지 않습니다.</span></label>
+    </div>
+
+    <div class="field">
       <span class="label">결과 저장 폴더</span>
       <div class="dir-row">
         <div class="dir-path" id="resultsDir" title="">—</div>
@@ -388,7 +395,7 @@
   </section>
 
   <section class="card progress" id="progress">
-    <div class="phase"><div class="spinner"></div><span id="phaseText">준비 중</span><span class="elapsed" id="elapsed"></span></div>
+    <div class="phase"><div class="spinner"></div><span id="phaseText">준비 중</span><span class="elapsed" id="elapsed"></span><button class="ghost small stop-btn" type="button" id="stopBtn">중지</button></div>
     <details class="log" open>
       <summary>실행 로그</summary>
       <div class="console" id="console"></div>
@@ -672,15 +679,26 @@
       file = { name: selectedFile.name, type: mimeOf(selectedFile), data: await readFile(selectedFile) };
     }
     const useLogin = !$('loginUseRow').hidden && $('useLogin').checked;
-    const res = await fetch('/api/run', { method: 'POST', body: JSON.stringify({ url, scope, mode, browsers, file, useLogin }) });
+    const clickAll = $('clickAll').checked;
+    if (clickAll && !confirm('전체 동작 확인을 켰습니다. 저장·등록·제출·삭제 등이 실제로 실행되어 데이터가 바뀔 수 있습니다. 계속할까요?')) return;
+    const res = await fetch('/api/run', { method: 'POST', body: JSON.stringify({ url, scope, mode, browsers, file, useLogin, clickAll }) });
     if (!res.ok) return showError((await res.json()).error || '실행할 수 없습니다.');
   }
   $('runBasic').addEventListener('click', () => start('basic'));
   $('runAi').addEventListener('click', () => start('ai'));
   document.querySelectorAll('input[name=browser]').forEach((el) => el.addEventListener('change', refreshForm));
 
+  $('stopBtn').addEventListener('click', async () => {
+    if (!confirm('실행 중인 분석·테스트를 중지할까요? 지금까지 만든 케이스 목록(cases.html)은 결과 폴더에 남습니다.')) return;
+    $('stopBtn').disabled = true;
+    $('stopBtn').textContent = '중지하는 중…';
+    await fetch('/api/stop', { method: 'POST', body: '{}' }).catch(() => {});
+  });
+
   function setRunning(on, phase) {
     running = on;
+    $('stopBtn').disabled = !on;
+    $('stopBtn').textContent = '중지';
     $('progress').classList.toggle('show', on);
     $('form').querySelectorAll('input, button').forEach((el) => { if (el.id !== 'openDir') el.disabled = on; });
     if (on) {

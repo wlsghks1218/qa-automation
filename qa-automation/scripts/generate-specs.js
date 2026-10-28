@@ -24,8 +24,9 @@ const MAX_FEATURES_PER_PAGE = Number(process.env.MAX_FEATURES_PER_PAGE || 25);
 const MAX_COMMON_FEATURES = Number(process.env.MAX_COMMON_FEATURES || 20);
 // 클릭 요소 밖의 일반 문구 수집 상한 (약관처럼 문단이 수백 개인 페이지 대비)
 const MAX_TEXTS_PER_PAGE = Number(process.env.MAX_TEXTS_PER_PAGE || 200);
-const CRAWL_DEPTH = Number(process.env.CRAWL_DEPTH || 1);
-const MAX_PAGES = Number(process.env.MAX_PAGES || 30);
+// 세부 페이지의 세부 페이지까지 새 페이지가 없을 때까지 따라간다 (단계·개수 상한은 무한 탐색 방지용)
+const CRAWL_DEPTH = Number(process.env.CRAWL_DEPTH || 10);
+const MAX_PAGES = Number(process.env.MAX_PAGES || 50);
 const VIEWPORT = { width: 1440, height: 900 };
 // 다국어 사이트는 locale 에 따라 문구가 달라지므로 분석 환경을 생성된 테스트에도 그대로 고정
 const LOCALE = process.env.LOCALE || Intl.DateTimeFormat().resolvedOptions().locale;
@@ -45,10 +46,18 @@ const BASE_RISKY = /(삭제|탈퇴|로그아웃|송금|출금하기|결제하기
 const STORAGE_STATE = process.env.QA_STORAGE_STATE && fs.existsSync(process.env.QA_STORAGE_STATE) ? process.env.QA_STORAGE_STATE : null;
 // 로그인 상태(안전 모드)에서는 실제 계정 데이터를 바꾸는 버튼도 누르지 않는다 (노출·문구만 확인)
 const DATA_CHANGING = /(출근|퇴근|출석|체크인|저장|등록|신청|제출|전송|보내기|발송|승인|반려|초기화|변경|업로드|작성\s?완료|save|submit|send|apply|register|approve|reject|reset|upload|check\s?in)/i;
-const RISKY = { test: (name) => BASE_RISKY.test(name) || (!!STORAGE_STATE && DATA_CHANGING.test(name)) };
-const RISKY_REASON = STORAGE_STATE
-  ? '로그인 안전 모드: 삭제·결제·제출·저장·출근 등 데이터가 바뀌는 버튼은 클릭하지 않음'
-  : '부작용 위험(삭제/결제/제출 등)으로 클릭하지 않음';
+// '전체 동작 확인'(앱 옵션, 테스트 계정·테스트 서버용): 저장·등록·제출·삭제까지 실제로 누른다.
+// 이때도 되돌릴 수 없는 동작(탈퇴·결제·송금)과 세션을 끊는 로그아웃은 누르지 않는다
+const CLICK_ALL = process.env.QA_CLICK_ALL === '1';
+const ALWAYS_BLOCK = /(탈퇴|송금|출금하기|결제하기|구매하기|로그아웃|log\s?out|sign\s?out|withdraw|unsubscribe)/i;
+const RISKY = {
+  test: (name) => (CLICK_ALL ? ALWAYS_BLOCK.test(name) : BASE_RISKY.test(name) || (!!STORAGE_STATE && DATA_CHANGING.test(name))),
+};
+const RISKY_REASON = CLICK_ALL
+  ? '되돌릴 수 없는 동작(탈퇴·결제·송금) 또는 로그아웃이라 클릭하지 않음'
+  : STORAGE_STATE
+    ? '안전 모드: 삭제·제출·저장·출근 등 데이터가 바뀌는 버튼은 클릭하지 않음 (전체 동작 확인을 켜면 실행)'
+    : '안전 모드: 삭제·결제·제출 등 부작용 위험 버튼은 클릭하지 않음 (전체 동작 확인을 켜면 실행)';
 
 const INTERACTIVE_SELECTOR = [
   'a[href]',
@@ -68,7 +77,7 @@ const BOT_CHECK = /just a moment|attention required|verify you are human|checkin
 
 // 모달/시트 안의 닫기 컨트롤
 // 로그인 상태에서는 '확인'이 "정말 진행할까요?"의 승인일 수 있으므로 닫기·취소·ESC 로만 닫는다
-const DIALOG_CLOSE = STORAGE_STATE ? /^(닫기|close|취소|cancel|×|✕|x)$/i : /^(닫기|close|취소|cancel|확인|×|✕|x)$/i;
+const DIALOG_CLOSE = STORAGE_STATE && !CLICK_ALL ? /^(닫기|close|취소|cancel|×|✕|x)$/i : /^(닫기|close|취소|cancel|확인|×|✕|x)$/i;
 
 // 화면 구조로 판별하는 페이지 유형 (URL 규칙은 사이트마다 달라 쓰지 않는다)
 const PAGE_TYPE_LABEL = { form: '입력폼형', list: '목록형', document: '문서형', general: '일반형', blocked: '접속 차단' };
@@ -152,52 +161,93 @@ function templateOf(pathname) {
     .join('/');
 }
 
-async function extractInternalPaths(page) {
+/**
+ * 같은 사이트 판별용 도메인: www.naver.com, news.naver.com → naver.com / shop.example.co.kr → example.co.kr
+ * 같은 사이트(서브도메인 포함)는 세부 페이지까지 모두 분석하고, 다른 사이트(광고·외부 링크)는 이동만 확인한다.
+ */
+// 누구나 서브도메인을 받는 호스팅 도메인: 서브도메인 하나가 곧 서로 다른 사이트다
+const HOSTING_SUFFIX = /\.(lovable\.app|vercel\.app|netlify\.app|github\.io|gitlab\.io|pages\.dev|workers\.dev|web\.app|firebaseapp\.com|herokuapp\.com|onrender\.com|fly\.dev|railway\.app|azurewebsites\.net|cloudfront\.net|amazonaws\.com|blogspot\.com|wordpress\.com|tistory\.com|notion\.site|wixsite\.com|webflow\.io|framer\.app|replit\.app|glitch\.me|surge\.sh|ngrok\.io|ngrok-free\.app)$/i;
+
+function siteOf(hostname) {
+  const parts = hostname.split('.');
+  if (/^[\d.]+$/.test(hostname) || parts.length <= 2) return hostname;
+  const hosting = hostname.match(HOSTING_SUFFIX);
+  if (hosting) return `${hostname.slice(0, hosting.index).split('.').pop()}${hosting[0]}`;
+  const lastTwo = parts.slice(-2).join('.');
+  return /^(co|or|go|ac|ne|re|pe|com|net|org|gov|edu)\.[a-z]{2}$/.test(lastTwo) ? parts.slice(-3).join('.') : lastTwo;
+}
+const START_SITE = siteOf(new URL(TARGET).hostname);
+const isSameSite = (u) => /^https?:$/.test(u.protocol) && siteOf(u.hostname) === START_SITE;
+
+// 광고·유입 추적용 파라미터: 같은 페이지가 주소만 달라 여러 번 분석되지 않도록 지운다
+const TRACKING_PARAM = /^(utm_\w+|fbclid|gclid|dclid|gbraid|wbraid|msclkid|yclid|igshid|mc_cid|mc_eid|_ga|_gl|ref|referral_code|dp_tracking_id|tracking_id|trk)$/i;
+// 웹 페이지가 아닌 파일 링크: 페이지로 분석하지 않고 링크 동작으로만 확인
+const FILE_EXT = /\.(pdf|zip|rar|7z|gz|dmg|exe|msi|apk|ipa|jpe?g|png|gif|webp|svg|mp4|mp3|mov|avi|docx?|xlsx?|pptx?|hwp|csv|txt|xml|json)$/i;
+function cleanUrl(u) {
+  const c = new URL(u.href);
+  c.hash = '';
+  for (const k of [...c.searchParams.keys()]) if (TRACKING_PARAM.test(k)) c.searchParams.delete(k);
+  return c;
+}
+
+// 분석 대상 표기: 시작 주소와 같은 origin 이면 경로(/a/b?x), 다른 서브도메인이면 전체 URL
+const targetOf = (u) => (u.origin === BASE_URL ? u.pathname + u.search : u.origin + u.pathname + u.search);
+const urlOfTarget = (t) => (/^https?:/.test(t) ? t : `${BASE_URL}${t}`);
+
+async function extractInternalTargets(page) {
   const rawHrefs = await page.evaluate(() =>
     Array.from(document.querySelectorAll('a[href]'))
       .map((a) => a.getAttribute('href'))
       .filter(Boolean)
   );
-  const paths = [];
+  const found = [];
   for (const raw of rawHrefs) {
     const trimmed = raw.trim();
     if (/^(mailto:|tel:|#|javascript:)/.test(trimmed)) continue;
     try {
       const parsed = new URL(trimmed, page.url());
-      // 같은 origin만 페이지 분석 대상. 외부/서브도메인 링크는 링크 기능 테스트로만 검증
-      if (parsed.origin === BASE_URL) paths.push(parsed.pathname + parsed.search);
+      // 같은 사이트만 페이지 분석 대상. 다른 사이트 링크는 링크 기능 테스트(이동 확인)로만 검증
+      if (isSameSite(parsed) && !FILE_EXT.test(parsed.pathname)) found.push(cleanUrl(parsed));
     } catch {
       // 파싱 실패 링크 무시
     }
   }
-  return paths;
+  return found;
 }
 
+/** 시작 페이지 → 세부 페이지 → 그 세부 페이지 … 새 페이지가 없을 때까지 (최대 MAX_PAGES) */
 async function discoverPaths(page) {
-  const startPath = new URL(START_URL).pathname + new URL(START_URL).search;
-  const seenTemplates = new Set([templateOf(new URL(START_URL).pathname)]);
-  const result = [startPath];
-  let frontier = [startPath];
+  const start = new URL(START_URL);
+  const keyOf = (u) => `${u.host}${templateOf(u.pathname)}${u.search}`;
+  const seen = new Set([keyOf(start)]);
+  const result = [targetOf(start)];
+  let frontier = [result[0]];
+  let capped = false;
 
-  for (let depth = 0; depth < CRAWL_DEPTH && frontier.length && result.length < MAX_PAGES; depth++) {
+  for (let depth = 0; depth < CRAWL_DEPTH && frontier.length; depth++) {
     const nextFrontier = [];
-    for (const p of frontier) {
+    for (const t of frontier) {
       try {
-        await openForAnalysis(page, `${BASE_URL}${p}`);
+        await openForAnalysis(page, urlOfTarget(t));
         await scrollThrough(page);
       } catch {
         continue;
       }
-      for (const found of await extractInternalPaths(page)) {
-        const template = templateOf(found.split('?')[0]) + (found.includes('?') ? '?' + found.split('?')[1] : '');
-        if (seenTemplates.has(template) || result.length >= MAX_PAGES) continue;
-        seenTemplates.add(template);
-        result.push(found);
-        nextFrontier.push(found);
+      for (const u of await extractInternalTargets(page)) {
+        if (seen.has(keyOf(u))) continue;
+        if (result.length >= MAX_PAGES) {
+          capped = true;
+          continue;
+        }
+        seen.add(keyOf(u));
+        result.push(targetOf(u));
+        nextFrontier.push(targetOf(u));
       }
     }
+    if (nextFrontier.length) console.log(`  -> ${depth + 1}단계 세부 페이지 ${nextFrontier.length}개 발견 (누적 ${result.length}개)`);
     frontier = nextFrontier;
   }
+  if (capped) console.warn(`  -> 페이지가 더 있지만 최대 ${MAX_PAGES}개까지만 분석합니다 (MAX_PAGES 로 조정 가능).`);
   return result;
 }
 
@@ -670,10 +720,14 @@ function kindOf(cand, spec) {
   return base;
 }
 
-async function analyzePage(context, pagePath, { commonSignatures, collectCommon }) {
+/**
+ * collectCommon: 헤더/메뉴/푸터 요소까지 분석 (시작 페이지, 그리고 서브도메인마다 첫 페이지)
+ * commonAsFeatures: 서브도메인 첫 페이지처럼 공통 요소를 그 페이지 기능으로 함께 테스트할 때
+ */
+async function analyzePage(context, pagePath, { commonSignatures, collectCommon, commonAsFeatures = false }) {
   const tag = pagePath;
   const step = (msg) => console.log(`   · [${tag}] ${msg}`);
-  const url = `${BASE_URL}${pagePath}`;
+  const url = urlOfTarget(pagePath);
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
@@ -772,7 +826,7 @@ async function analyzePage(context, pagePath, { commonSignatures, collectCommon 
       if (isCommon && !collectCommon) continue;
       if (!isCommon && commonSignatures.has(signature)) continue;
       // 부작용 위험 요소(삭제/결제/제출 등)도 노출·문구는 확인하고 클릭만 하지 않는다
-      const risky = RISKY.test(spec.name) || cand.type === 'submit';
+      const risky = RISKY.test(spec.name) || (cand.type === 'submit' && !CLICK_ALL);
       resolved.push({ cand, spec, signature, risky, bucket: isCommon ? 'common' : 'features' });
     }
 
@@ -875,6 +929,10 @@ async function analyzePage(context, pagePath, { commonSignatures, collectCommon 
   } finally {
     await page.close().catch(() => {});
   }
+  if (commonAsFeatures) {
+    result.features = [...result.common, ...result.features];
+    result.common = [];
+  }
   return result;
 }
 
@@ -911,10 +969,12 @@ function actionCode(f) {
     case 'navigate': {
       const u = new URL(f.url);
       // 외부 사이트는 지역/언어별 리다이렉트로 경로가 바뀌므로 도메인까지만 비교
+      // 다른 사이트(광고·외부 링크)는 그 페이지를 분석하지 않고 해당 사이트로 이동하는지만 확인
       const external = u.origin !== BASE_URL;
       body.push(`await target.click();`);
       body.push(`await expect(page).toHaveURL(${urlMatcher(f.url, external)});`);
-      return { action: `페이지 이동 → ${external ? u.host : u.pathname}`, body };
+      const action = !isSameSite(u) ? `외부 사이트 이동 → ${u.host}` : external ? `페이지 이동 → ${u.host}${u.pathname}` : `페이지 이동 → ${u.pathname}`;
+      return { action, body };
     }
     case 'brokenLink':
       // 분석 시 연결에 실패한 링크: 정상 페이지로 열리는지 검증 (지금 상태면 실패로 보고됨)
@@ -1221,10 +1281,22 @@ function slugOf(pagePath) {
   }
   console.log(`  -> 시작 페이지 기능 ${home.features.length}개, 공통 기능 ${home.common.length}개`);
 
+  // 다른 서브도메인(같은 사이트)은 헤더/메뉴가 다를 수 있으므로 서브도메인마다 첫 페이지에서 그 공통 요소도 확인
+  const firstOfHost = new Set();
+  const seenHosts = new Set([new URL(START_URL).host]);
+  for (const p of subPaths) {
+    const host = new URL(urlOfTarget(p)).host;
+    if (!seenHosts.has(host)) {
+      seenHosts.add(host);
+      firstOfHost.add(p);
+    }
+  }
+
   console.log(`\n[3/4] 세부 페이지 ${subPaths.length}개 분석: 각 페이지 본문의 링크·버튼·펼치기·입력 요소 동작 확인 중 (동시 ${CONCURRENCY}개)...`);
   let done = 0;
   const subs = await runPool(subPaths, CONCURRENCY, async (p) => {
-    const r = await analyzePage(context, p, { commonSignatures, collectCommon: false });
+    const ownCommon = firstOfHost.has(p);
+    const r = await analyzePage(context, p, { commonSignatures, collectCommon: ownCommon, commonAsFeatures: ownCommon });
     done++;
     console.log(`  -> [${done}/${subPaths.length}] ${p} 완료: 기능 ${r.features.length}개 탐지${r.skipped.length ? `, 제외 ${r.skipped.length}개` : ''}`);
     return r;
