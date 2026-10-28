@@ -40,6 +40,21 @@ const run = (args, env = {}) =>
   for (const f of fs.readdirSync(browsersDir)) {
     if (f.startsWith('.') || f.startsWith('chromium_headless_shell')) fs.rmSync(path.join(browsersDir, f), { recursive: true, force: true });
   }
+  // 대상이 없는 심볼릭 링크(WebKit.framework 안 등)는 macOS 서명 단계에서 ENOENT 로 빌드가 멈추므로 지운다
+  const removeDanglingLinks = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isSymbolicLink()) {
+        if (!fs.existsSync(p)) {
+          fs.unlinkSync(p);
+          console.log(`  - 깨진 링크 제거: ${path.relative(browsersDir, p)}`);
+        }
+      } else if (e.isDirectory()) {
+        removeDanglingLinks(p);
+      }
+    }
+  };
+  removeDanglingLinks(browsersDir);
 
   console.log(`\n[2/3] 아이콘 생성`);
   await buildIcons();

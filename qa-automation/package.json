@@ -86,6 +86,9 @@
       "identity": "-",
       "hardenedRuntime": false,
       "gatekeeperAssess": false,
+      "signIgnore": [
+        "Contents/Resources/pw-browsers/"
+      ],
       "artifactName": "${productName}_v${env.QA_DISPLAY_VERSION}_${arch}.${ext}"
     }
   },
