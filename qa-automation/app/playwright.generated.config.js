@@ -24,7 +24,8 @@ module.exports = defineConfig({
   use: {
     // 앱에서 저장한 로그인 상태가 있으면 모든 테스트를 로그인된 상태로 시작
     ...(process.env.QA_STORAGE_STATE && fs.existsSync(process.env.QA_STORAGE_STATE) ? { storageState: process.env.QA_STORAGE_STATE } : {}),
-    trace: 'retain-on-failure',
+    // 저장된 로그인으로 실행할 때는 트레이스를 남기지 않는다 (트레이스에 쿠키 · 저장소 · 요청 헤더가 그대로 들어감)
+    trace: process.env.QA_STORAGE_STATE ? 'off' : 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
   },

@@ -22,12 +22,49 @@ export async function dismissPopups(page: Page) {
   }
 }
 
+/** 같은 사이트 판별 (generate-specs.js 의 siteOf 와 같은 기준) */
+function siteOf(hostname: string) {
+  const parts = hostname.split('.');
+  if (/^[\d.]+$/.test(hostname) || parts.length <= 2) return hostname;
+  const hosting = hostname.match(/\.(lovable\.app|vercel\.app|netlify\.app|github\.io|pages\.dev|web\.app|firebaseapp\.com|herokuapp\.com)$/i);
+  if (hosting) return `${hostname.slice(0, hosting.index).split('.').pop()}${hosting[0]}`;
+  const lastTwo = parts.slice(-2).join('.');
+  return /^(co|or|go|ac|ne|re|pe|com|net|org|gov|edu)\.[a-z]{2}$/.test(lastTwo) ? parts.slice(-3).join('.') : lastTwo;
+}
+const sameSite = (a: string, b: string) => {
+  try {
+    return siteOf(new URL(a).hostname) === siteOf(new URL(b).hostname);
+  } catch {
+    return false;
+  }
+};
+const shortUrl = (u: string) => (u.length > 120 ? `${u.slice(0, 117)}…` : u);
+
 /**
- * 페이지 진입 + 팝업 처리. 이후 발생하는 JS 런타임 오류를 수집해서 반환합니다.
+ * 페이지 진입 + 팝업 처리. 이후 발생하는 문제를 모아서 반환합니다.
+ *  errors: JS 런타임 오류 · network: 같은 사이트 요청 실패(404 · 5xx · 연결 실패)
+ *  consoleErrors: console.error · mixed: https 페이지의 http 리소스
  */
 export async function openPage(page: Page, url: string) {
   const errors: string[] = [];
+  const network: string[] = [];
+  const consoleErrors: string[] = [];
+  const mixed: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message));
+  page.on('response', (r) => {
+    const s = r.status();
+    const u = r.url();
+    if ((s >= 500 || s === 404) && sameSite(u, url)) network.push(`${s} ${r.request().method()} ${shortUrl(u)}`);
+    if (url.startsWith('https:') && u.startsWith('http:')) mixed.push(shortUrl(u));
+  });
+  page.on('requestfailed', (r) => {
+    const err = r.failure()?.errorText || '';
+    // 페이지 이동으로 취소된 요청(ERR_ABORTED)은 정상
+    if (!/ABORTED|cancel/i.test(err) && sameSite(r.url(), url)) network.push(`연결 실패(${err}) ${r.method()} ${shortUrl(r.url())}`);
+  });
+  page.on('console', (m) => {
+    if (m.type() === 'error') consoleErrors.push(m.text().replace(/\s+/g, ' ').slice(0, 200));
+  });
 
   // 테스트 도중 뒤늦게 뜨는 팝업 자동 처리
   await page.addLocatorHandler(
@@ -44,7 +81,82 @@ export async function openPage(page: Page, url: string) {
   await first.waitFor({ state: 'visible', timeout: 3000 }).catch(() => {});
   await dismissPopups(page);
 
-  return { response, errors };
+  return { response, errors, network, consoleErrors, mixed };
+}
+
+/** 깨진 이미지 주소 목록 (끝까지 스크롤해서 레이지 로딩 이미지까지) */
+export async function brokenImages(page: Page): Promise<string[]> {
+  await scrollThrough(page);
+  return page.$$eval('img', (imgs) =>
+    (imgs as HTMLImageElement[]).filter((img) => img.complete && img.naturalWidth === 0 && !!img.currentSrc).map((img) => img.currentSrc)
+  );
+}
+
+/**
+ * 후보 로케이터 중 화면에서 처음 찾아지는 것 (기본 로케이터 → 문구 기반 → 구조 경로 순).
+ * 버튼 이름이 조금 바뀌어도 바로 실패하지 않도록 한다. fallback 을 썼으면 used > 0.
+ */
+export async function firstFound(page: Page, candidates: import('@playwright/test').Locator[], timeout = 8000) {
+  const end = Date.now() + timeout;
+  while (Date.now() < end) {
+    for (let i = 0; i < candidates.length; i++) {
+      if (await candidates[i].isVisible().catch(() => false)) return { target: candidates[i], used: i };
+    }
+    await page.waitForTimeout(300);
+  }
+  return { target: candidates[0], used: 0 };
+}
+
+/** 모바일 화면에서 가로로 넘치는 정도와 넘치는 요소 (스크롤 영역 안의 요소는 제외) */
+export async function mobileOverflow(page: Page) {
+  return page.evaluate(() => {
+    const overflow = document.documentElement.scrollWidth - window.innerWidth;
+    const inScroller = (el: Element) => {
+      for (let a = el.parentElement; a && a !== document.body; a = a.parentElement) {
+        const s = getComputedStyle(a);
+        if (/(auto|scroll|hidden)/.test(s.overflowX)) return true;
+      }
+      return false;
+    };
+    const wide: string[] = [];
+    for (const el of Array.from(document.body.querySelectorAll('*'))) {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.right <= window.innerWidth + 2 || inScroller(el)) continue;
+      const cls = typeof (el as HTMLElement).className === 'string' ? `.${(el as HTMLElement).className.split(/\s+/).filter(Boolean).slice(0, 2).join('.')}` : '';
+      wide.push(`${el.tagName.toLowerCase()}${cls} (${Math.round(r.right - window.innerWidth)}px 넘침) "${((el as HTMLElement).innerText || '').trim().slice(0, 20)}"`);
+      if (wide.length >= 5) break;
+    }
+    return { overflow, wide };
+  });
+}
+
+/** 성능: DOMContentLoaded · load · LCP(가장 큰 콘텐츠가 그려진 시점) ms */
+export async function perfMetrics(page: Page) {
+  return page.evaluate(
+    () =>
+      new Promise<{ dcl: number; load: number; lcp: number }>((resolve) => {
+        const nav = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined;
+        let lcp = 0;
+        try {
+          new PerformanceObserver((list) => {
+            for (const e of list.getEntries()) lcp = Math.max(lcp, e.startTime);
+          }).observe({ type: 'largest-contentful-paint', buffered: true });
+        } catch {
+          // LCP 를 지원하지 않는 브라우저 (WebKit 등)
+        }
+        setTimeout(() => resolve({ dcl: Math.round(nav?.domContentLoadedEventEnd || 0), load: Math.round(nav?.loadEventEnd || 0), lcp: Math.round(lcp) }), 300);
+      })
+  );
+}
+
+/** 접근성 점검 (axe-core, WCAG 2 A/AA). 위반 규칙별 요약 */
+export async function axeScan(page: Page) {
+  const { default: AxeBuilder } = await import('@axe-core/playwright');
+  const res = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa']).analyze();
+  const rank: Record<string, number> = { critical: 0, serious: 1, moderate: 2, minor: 3 };
+  return res.violations
+    .map((v) => ({ id: v.id, impact: v.impact || 'minor', help: v.help, count: v.nodes.length, target: String(v.nodes[0]?.target?.[0] || '') }))
+    .sort((a, b) => (rank[a.impact] ?? 9) - (rank[b.impact] ?? 9));
 }
 
 /** 레이지 로딩 요소까지 렌더링되도록 끝까지 스크롤 후 상단 복귀 */
@@ -98,6 +210,10 @@ export function checks() {
     /** 규칙 기반 오타 의심: 실패로 보지 않고 경고로만 남긴다 */
     warn(text: string, reasons: string[]) {
       note(`오타 의심: "${text}"|warning|${reasons.join(' / ')}`);
+    },
+    /** 실패로 보지 않는 점검 (성능 · 접근성 · 콘솔 오류 등): 문제가 있으면 경고 */
+    soft(name: string, ok: boolean, detail = '') {
+      note(`${name}|${ok ? 'passed' : 'warning'}|${ok ? '' : detail}`);
     },
     done() {
       if (failures.length) throw new Error(failures.join('\n'));

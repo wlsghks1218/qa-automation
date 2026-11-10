@@ -327,6 +327,7 @@
         <button class="ghost small" type="button" id="loginCancel" hidden>취소</button>
         <button class="ghost small" type="button" id="loginClear" hidden>저장된 로그인 삭제</button>
       </div>
+      <p class="hint" style="margin:6px 0 0">⚠️ 테스트 계정으로만 로그인하세요. 로그인 상태는 이 PC에 암호화되어 저장되고, 일정 기간이 지나면 자동 삭제됩니다.</p>
       <label class="login-use" id="loginUseRow" hidden><input type="checkbox" id="useLogin" checked> 저장된 로그인으로 테스트 <span class="hint">· 안전 모드: 출근·저장·등록·제출·삭제처럼 데이터가 바뀌는 버튼은 누르지 않고 노출·문구만 확인</span></label>
       <div class="notice warn" id="loginNotice"></div>
     </div>
@@ -606,6 +607,18 @@
     }
   }
 
+  // "방금 저장" · "3시간 전 저장" · "2일 전 저장"
+  function ageText(t) {
+    const m = Math.floor((Date.now() - t) / 60000);
+    if (m < 1) return '방금 저장';
+    if (m < 60) return `${m}분 전 저장`;
+    if (m < 1440) return `${Math.floor(m / 60)}시간 전 저장`;
+    return `${Math.floor(m / 1440)}일 전 저장`;
+  }
+
+  // 운영 사이트로 보이는지 (주소에 dev · stg · test · qa · localhost 등이 없으면)
+  const looksLikeProduction = (host) => !/(^|[.-])(dev|develop|stg|stage|staging|test|testing|qa|sandbox|beta|preview|local|localhost)([.-]|\d|$)|^127\.|^localhost/i.test(host);
+
   function showLogin(info) {
     if (!info || info.error) return;
     loginActive = !!info.active;
@@ -614,7 +627,7 @@
     st.textContent = loginActive
       ? '로그인 창이 열려 있습니다. 로그인(인증 포함)을 끝낸 뒤 "로그인 완료"를 눌러주세요.'
       : info.saved
-        ? `${info.host} 로그인 저장됨 (${new Date(info.savedAt).toLocaleString('ko-KR')})`
+        ? `${info.host} 로그인 저장됨 · ${ageText(info.savedAt)}${info.maxAgeDays ? ` · ${Math.max(0, info.maxAgeDays - Math.floor((Date.now() - info.savedAt) / 86400000))}일 후 자동 삭제` : ''}${info.encrypted === false ? ' · ⚠ 암호화 안 됨(개발 모드)' : ''}`
         : '저장된 로그인 없음';
     $('loginOpen').hidden = loginActive;
     $('loginOpen').textContent = info.saved ? '다시 로그인' : '로그인 창 열기';
@@ -665,6 +678,8 @@
 
   $('loginOpen').addEventListener('click', async () => {
     if (!validUrl()) return showError('로그인할 사이트의 URL을 먼저 입력해주세요.');
+    const host = new URL(validUrl()).host;
+    if (looksLikeProduction(host) && !confirm(`${host} 은(는) 운영 사이트로 보입니다.\n\n실제 사용자 계정이 아닌 테스트 계정으로만 로그인하세요. 로그인 상태(쿠키)가 이 PC에 저장되고, 테스트 중 화면이 결과 폴더에 캡처됩니다.\n\n계속할까요?`)) return;
     const info = await loginApi('start');
     if (info) showLogin({ ...info, active: true });
   });
@@ -693,6 +708,19 @@
     const useLogin = !$('loginUseRow').hidden && $('useLogin').checked;
     const clickAll = $('clickAll').checked;
     if (clickAll && !confirm('전체 동작 확인을 켰습니다. 저장·등록·제출·삭제 등이 실제로 실행되어 데이터가 바뀔 수 있습니다. 계속할까요?')) return;
+    // AI 테스트 + 저장된 로그인: 로그인된 화면 캡처가 AI 제공사로 전송되므로 한 번 동의를 받는다
+    if (mode === 'ai' && useLogin) {
+      let agreed = false;
+      try {
+        agreed = localStorage.getItem('aiLoginConsent') === '1';
+      } catch {}
+      if (!agreed) {
+        if (!confirm('로그인된 화면의 캡처와 화면 문구가 AI 제공사로 전송됩니다. 개인정보가 보이는 화면이면 AI 테스트를 쓰지 마세요.\n\n계속할까요? (이 PC에서는 다시 묻지 않습니다)')) return;
+        try {
+          localStorage.setItem('aiLoginConsent', '1');
+        } catch {}
+      }
+    }
     const res = await fetch('/api/run', { method: 'POST', body: JSON.stringify({ url, scope, mode, browsers, file, useLogin, clickAll }) });
     if (!res.ok) return showError((await res.json()).error || '실행할 수 없습니다.');
   }
@@ -830,6 +858,34 @@
       </section>`;
   }
 
+  // 이전 실행 대비 변경 (회귀 확인)
+  function renderChanges(ch) {
+    if (!ch) return '';
+    const s = ch.summary;
+    const total = s.pagesAdded + s.pagesRemoved + s.elementsAdded + s.elementsRemoved + s.actionsChanged + s.textsAdded + s.textsRemoved;
+    const pages = ch.pages
+      .map((p) => `<details class="group"><summary><span class="t">${esc(p.path)}</span><span class="pill ${p.status === 'removed' ? 'fail' : 'pass'}">${p.items.length}건</span></summary>
+        <ul class="typos" style="margin:6px 14px 10px">${p.items.map((i) => `<li><b>${esc(i.type)}</b> <span class="why">${esc(i.text)}</span></li>`).join('')}</ul></details>`)
+      .join('');
+    return `
+      <section class="card">
+        <div class="section-title"><h2>이전 실행 대비 변경</h2><span class="meta">${esc(ch.prevId)} 실행과 비교 · ${total ? `${total}건` : '변경 없음'}</span></div>
+        <p class="hint" style="margin:0 0 10px">페이지 +${s.pagesAdded} / -${s.pagesRemoved} · 요소 +${s.elementsAdded} / -${s.elementsRemoved} · 동작 변경 ${s.actionsChanged} · 문구 +${s.textsAdded} / -${s.textsRemoved}</p>
+        ${pages}
+      </section>`;
+  }
+
+  // 전체 동작 확인으로 실제로 눌린 데이터 변경 버튼
+  function renderDataActions(list) {
+    if (!list || !list.length) return '';
+    return `
+      <section class="card">
+        <div class="section-title"><h2>데이터가 바뀌었을 수 있는 동작</h2><span class="meta">전체 동작 확인 · ${list.length}건</span></div>
+        <p class="hint" style="margin:0 0 8px">분석 중 실제로 눌렀고, 테스트 실행 때도 브라우저 수 × (1 + 재시도)만큼 다시 눌립니다. 생성된 데이터가 있으면 정리해 주세요.</p>
+        <ul class="typos">${list.map((a) => `<li>${esc(a.page)} · "${esc(a.label)}" <span class="why">→ ${esc(a.effect)}</span></li>`).join('')}</ul>
+      </section>`;
+  }
+
   function renderTypos(typos) {
     if (!typos || !typos.length) return '';
     return `
@@ -931,12 +987,15 @@
       <div class="section-title" style="margin-top:28px">
         <h2>실행 결과</h2>
         <span class="meta">${target} · ${r.mode === 'ai' ? 'AI 테스트' : '규칙 기반 테스트'} · ${r.scope === 'all' ? '세부 사이트 모두' : '입력한 범위만'} · ${Math.floor(took / 60)}분 ${took % 60}초</span>
+        ${r.loggedIn ? '<span class="pill fail" title="로그인된 화면의 캡처 · 영상이 결과 폴더에 있습니다">로그인 화면 포함 · 외부 공유 주의</span>' : ''}
         <span class="grow"></span>
         ${r.casesUrl ? `<a class="ghost small" href="${r.casesUrl}" target="_blank">케이스 보기 (HTML)</a>` : ''}
         <button class="ghost small" type="button" onclick="fetch('/api/open-folder',{method:'POST',body:JSON.stringify({id:${JSON.stringify(r.id)}})})">결과 폴더 열기</button>
       </div>
       ${errors}
       ${r.tests ? renderTests(r.tests, r.reportUrl) : ''}
+      ${renderChanges(r.changes)}
+      ${renderDataActions(r.dataActions)}
       ${renderTypos(r.typos)}
       ${r.ai ? renderDoc(r.ai.doc, r.ai.csvUrl, 'AI 분석 TC', renderFindings(r.ai.findings)) : ''}
       ${r.doc ? renderDoc(r.doc, r.docCsvUrl) : ''}`;

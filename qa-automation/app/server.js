@@ -5,7 +5,7 @@ const { spawn } = require('child_process');
 
 const {
   ENV_PATH, SETTINGS_PATH, WORKSPACE, GENERATED_DIR, DEFAULT_RESULTS_DIR,
-  GENERATOR, PLAYWRIGHT_CONFIG, PLAYWRIGHT_CLI, AUTH_DIR, LOGIN_SCRIPT, CODE_ROOT, prepareWorkspace,
+  GENERATOR, PLAYWRIGHT_CONFIG, PLAYWRIGHT_CLI, AUTH_DIR, LOGIN_SCRIPT, CODE_ROOT, USER_DIR, prepareWorkspace,
 } = require('./paths');
 require('dotenv').config({ path: ENV_PATH, quiet: true });
 
@@ -13,6 +13,8 @@ const { generateDocTestCases, mapDocToFeatures, toCsv } = require('./doc-testcas
 const { PROVIDERS } = require('./llm');
 const { analyzeSiteWithAi } = require('./site-ai');
 const { buildCasesHtml } = require('./cases-report');
+const { encryptionAvailable, sealFile, openSealed, tempPath } = require('./secure-store');
+const { findPreviousRun, compareAnalysis } = require('./compare-runs');
 // 테스트 진행률(완료/전체)을 출력하는 리포터 → 앱 프로그레스 바
 const PROGRESS_REPORTER = path.join(__dirname, 'progress-reporter.js');
 const { writeDocSpecs } = require('../scripts/lib/doc-specs');
@@ -26,7 +28,8 @@ let APP_URL = 'http://127.0.0.1';
 // 사용자 설정 (결과 저장 폴더 등) - settings.json
 // ─────────────────────────────────────────────────────────────
 
-const DEFAULT_SETTINGS = { resultsDir: DEFAULT_RESULTS_DIR, llmProvider: 'gemini', llmModels: {} };
+// authMaxAgeDays: 저장된 로그인을 자동 삭제하기까지의 일수 (0 이면 자동 삭제 안 함)
+const DEFAULT_SETTINGS = { resultsDir: DEFAULT_RESULTS_DIR, llmProvider: 'gemini', llmModels: {}, authMaxAgeDays: 7 };
 
 function loadSettings() {
   try {
@@ -216,34 +219,91 @@ function runNode(args, env = {}) {
 // 로그인: 사람이 직접 로그인한 상태(쿠키·저장소)를 사이트(host)별로 저장해 분석·테스트에 사용
 // ─────────────────────────────────────────────────────────────
 
-const authPathFor = (url) => path.join(AUTH_DIR, `${new URL(url).host.replace(/[^a-z0-9.-]/gi, '_')}.json`);
+// 저장 파일: 암호화(<host>.json.enc). 암호화를 쓸 수 없는 환경(개발 모드 등)에서만 평문(<host>.json)
+const hostFile = (url) => new URL(url).host.replace(/[^a-z0-9.-]/gi, '_');
+const authPlainPath = (url) => path.join(AUTH_DIR, `${hostFile(url)}.json`);
+const authEncPath = (url) => path.join(AUTH_DIR, `${hostFile(url)}.json.enc`);
+const authFileOf = (url) => [authEncPath(url), authPlainPath(url)].find((p) => fs.existsSync(p)) || null;
+const DAY = 24 * 60 * 60 * 1000;
+
+function clearAuth(url) {
+  fs.rmSync(authEncPath(url), { force: true });
+  fs.rmSync(authPlainPath(url), { force: true });
+}
 
 function authInfo(url) {
   try {
-    const p = authPathFor(url);
-    const base = { host: new URL(url).host, active: !!loginSession && loginSession.host === new URL(url).host };
-    if (!fs.existsSync(p)) return { ...base, saved: false };
-    return { ...base, saved: true, savedAt: fs.statSync(p).mtimeMs };
+    const base = { host: new URL(url).host, active: !!loginSession && loginSession.host === new URL(url).host, maxAgeDays: settings.authMaxAgeDays };
+    const file = authFileOf(url);
+    if (!file) return { ...base, saved: false };
+    const savedAt = fs.statSync(file).mtimeMs;
+    // 오래된 로그인은 자동 삭제 (설정: authMaxAgeDays, 기본 7일)
+    if (settings.authMaxAgeDays > 0 && Date.now() - savedAt > settings.authMaxAgeDays * DAY) {
+      clearAuth(url);
+      log(`[로그인] ${base.host} 저장된 로그인이 ${settings.authMaxAgeDays}일이 지나 자동 삭제했습니다.`);
+      return { ...base, saved: false, expired: true };
+    }
+    return { ...base, saved: true, savedAt, encrypted: file.endsWith('.enc') };
   } catch {
     return { saved: false, active: false };
   }
 }
 
-let loginSession = null; // { child, host, url }
+/** 저장된 로그인을 실행용 임시 파일로 꺼낸다 → { path, cleanup }. 실행이 끝나면 cleanup() */
+function openAuth(url) {
+  return openSealed(authEncPath(url), authPlainPath(url));
+}
+
+/** 시작 시: 예전 평문 로그인 파일을 암호화 파일로 옮기고 오래된 로그인 정리 */
+function migrateAuthFiles() {
+  // 앱이 비정상 종료돼 남은 로그인 임시 파일 정리
+  try {
+    const tmp = require('os').tmpdir();
+    for (const f of fs.readdirSync(tmp)) if (/^qa-kc-(auth|login)-[0-9a-f]+\.json$/.test(f)) fs.rmSync(path.join(tmp, f), { force: true });
+  } catch {
+    // 임시 폴더를 읽을 수 없으면 건너뜀
+  }
+  if (!fs.existsSync(AUTH_DIR)) return;
+  for (const f of fs.readdirSync(AUTH_DIR)) {
+    const p = path.join(AUTH_DIR, f);
+    if (f.endsWith('.json') && encryptionAvailable()) {
+      sealFile(p, `${p}.enc`, p);
+      log(`[로그인] 저장된 로그인 ${f} 을(를) 암호화했습니다.`);
+    }
+    if (/\.json(\.enc)?$/.test(f) && settings.authMaxAgeDays > 0 && fs.existsSync(p) && Date.now() - fs.statSync(p).mtimeMs > settings.authMaxAgeDays * DAY) {
+      fs.rmSync(p, { force: true });
+    }
+  }
+}
+
+let loginSession = null; // { child, host, url, temp }
 
 function startLogin(url) {
   if (loginSession) loginSession.child.kill();
-  const child = spawn(process.execPath, [LOGIN_SCRIPT, url, authPathFor(url)], {
+  // 로그인 창은 임시 평문 파일에 저장 → 성공하면 메인 프로세스가 암호화해 보관하고 임시 파일은 지운다
+  const temp = tempPath('login');
+  const existing = openAuth(url);
+  if (existing.path) fs.copyFileSync(existing.path, temp); // 이어서 로그인(만료 확인 · 재로그인)
+  existing.cleanup();
+  const child = spawn(process.execPath, [LOGIN_SCRIPT, url, temp], {
     cwd: WORKSPACE,
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', FORCE_COLOR: '0' },
   });
-  const session = { child, host: new URL(url).host, url };
+  const session = { child, host: new URL(url).host, url, temp };
   loginSession = session;
   const pipe = (stream) => stream.on('data', (d) => d.toString('utf-8').split(/\r?\n/).forEach(log));
   pipe(child.stdout);
   pipe(child.stderr);
   session.closed = new Promise((resolve) => child.on('close', (code) => {
     if (loginSession === session) loginSession = null;
+    try {
+      if (code === 0 && fs.existsSync(temp)) {
+        const { encrypted } = sealFile(temp, authEncPath(url), authPlainPath(url));
+        if (!encrypted) log('[로그인] 경고: 이 환경에서는 암호화를 쓸 수 없어 로그인 상태를 암호화하지 않고 저장했습니다 (개발 모드).');
+      }
+    } finally {
+      fs.rmSync(temp, { force: true });
+    }
     broadcast('login', authInfo(url));
     resolve(code);
   }));
@@ -254,13 +314,14 @@ function startLogin(url) {
 function checkLogin(url) {
   return new Promise((resolve) => {
     let out = '';
-    const p = authPathFor(url);
-    const child = spawn(process.execPath, [path.join(CODE_ROOT, 'scripts', 'login-check.js'), url, ...(fs.existsSync(p) ? [p] : [])], {
+    const auth = openAuth(url);
+    const child = spawn(process.execPath, [path.join(CODE_ROOT, 'scripts', 'login-check.js'), url, ...(auth.path ? [auth.path] : [])], {
       cwd: WORKSPACE,
       env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
     });
     child.stdout.on('data', (d) => (out += d.toString('utf-8')));
     child.on('close', () => {
+      auth.cleanup();
       try {
         resolve(JSON.parse(out.trim().split(/\r?\n/).pop()));
       } catch {
@@ -405,6 +466,7 @@ async function runJob({ url, scope, file, mode, browsers, useLogin, clickAll }) 
   let mappings = null;
   let plan = null; // 생성기 케이스 목록 (cases.json)
   const loginEnv = {};
+  let authHandle = null; // 복호화한 로그인 임시 파일 (실행 끝에 삭제)
   let aiMappings = null;
 
   try {
@@ -429,7 +491,9 @@ async function runJob({ url, scope, file, mode, browsers, useLogin, clickAll }) 
       setPhase(crawlScope === 'all' ? '사이트 및 세부 페이지 분석 중' : '입력한 페이지 분석 중');
       // 저장된 로그인이 있고 사용하기로 했으면 분석·테스트 모두 로그인된 상태로 (데이터가 바뀌는 버튼은 누르지 않는 안전 모드)
       if (useLogin && authInfo(url).saved) {
-        loginEnv.QA_STORAGE_STATE = authPathFor(url);
+        // 암호화된 로그인을 이번 실행 동안만 임시 파일로 꺼내 쓰고, 끝나면(중지 · 오류 포함) 지운다
+        authHandle = openAuth(url);
+        loginEnv.QA_STORAGE_STATE = authHandle.path;
         result.loggedIn = true;
         log(`[로그인] ${new URL(url).host} 저장된 로그인 상태로 테스트합니다 (안전 모드).`);
       }
@@ -438,7 +502,13 @@ async function runJob({ url, scope, file, mode, browsers, useLogin, clickAll }) 
         result.clickAll = true;
         log('[동작 확인] 전체 동작 확인: 데이터가 바뀌는 버튼도 실제로 누릅니다 (탈퇴·결제·송금·로그아웃 제외).');
       }
-      const genCode = await runNode([GENERATOR, url, `--scope=${crawlScope}`], { QA_OUTPUT_DIR: GENERATED_DIR, ...loginEnv, ...(clickAll ? { QA_CLICK_ALL: '1' } : {}) });
+      const genCode = await runNode([GENERATOR, url, `--scope=${crawlScope}`], {
+        QA_OUTPUT_DIR: GENERATED_DIR,
+        // 화면 구조가 그대로인 페이지는 이전 분석을 재사용 (분석 시간 단축)
+        QA_CACHE_DIR: path.join(USER_DIR, 'cache'),
+        ...loginEnv,
+        ...(clickAll ? { QA_CLICK_ALL: '1' } : {}),
+      });
       checkStop();
       if (genCode !== 0) throw new Error('사이트 분석에 실패했습니다. 로그를 확인해주세요.');
 
@@ -447,6 +517,18 @@ async function runJob({ url, scope, file, mode, browsers, useLogin, clickAll }) 
       fs.copyFileSync(analysisPath, path.join(runDir, 'analysis.json'));
       // 규칙 기반 오타 의심 (LLM 없이). 테스트 실패가 아니라 경고로 따로 보여준다
       result.typos = analysis.typos || [];
+      // 전체 동작 확인으로 실제로 눌린 데이터 변경 버튼 (정리 · 확인용)
+      result.dataActions = analysis.pages.flatMap((p) => (p.dataActions || []).map((a) => ({ page: p.path, ...a })));
+      result.cachedPages = analysis.pages.filter((p) => p.cached).map((p) => p.path);
+
+      // 이전 실행 대비 변경 감지 (같은 URL · 범위의 직전 분석과 비교)
+      const prevRun = findPreviousRun(settings.resultsDir, id, analysis.meta.startUrl, analysis.meta.scope);
+      if (prevRun) {
+        result.changes = { prevId: prevRun.id, ...compareAnalysis(prevRun.analysis, analysis) };
+        fs.writeFileSync(path.join(runDir, 'changes.json'), JSON.stringify(result.changes, null, 2), 'utf-8');
+        const s = result.changes.summary;
+        log(`[변경 감지] 이전 실행(${prevRun.id}) 대비: 페이지 +${s.pagesAdded}/-${s.pagesRemoved} · 요소 +${s.elementsAdded}/-${s.elementsRemoved} · 동작 변경 ${s.actionsChanged} · 문구 +${s.textsAdded}/-${s.textsRemoved}`);
+      }
 
       // 케이스 목록(실행 전) → 결과 폴더의 cases.html. 테스트가 끝나면 같은 파일에 결과를 채운다
       const casesPath = path.join(GENERATED_DIR, 'cases.json');
@@ -542,6 +624,7 @@ async function runJob({ url, scope, file, mode, browsers, useLogin, clickAll }) 
     fs.writeFileSync(path.join(runDir, 'summary.json'), JSON.stringify(result, null, 2), 'utf-8');
     state.running = false;
     state.logFile = null;
+    if (authHandle) authHandle.cleanup();
     state.result = result;
     setPhase('');
     broadcast('done', result);
@@ -711,7 +794,7 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, authInfo(target));
       }
       if (req.method === 'POST' && pathname === '/api/login/clear') {
-        fs.rmSync(authPathFor(target), { force: true });
+        clearAuth(target);
         return json(res, 200, authInfo(target));
       }
     }
@@ -762,6 +845,7 @@ const server = http.createServer(async (req, res) => {
 function start({ port = 0, hooks: overrides = {} } = {}) {
   Object.assign(hooks, overrides);
   prepareWorkspace();
+  migrateAuthFiles();
   return new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, '127.0.0.1', () => {

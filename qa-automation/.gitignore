@@ -17,3 +17,6 @@ node_modules/
 /settings.json
 /tests/generated/
 /auth/
+
+# 프로젝트 루트에 놓인 개인 PDF 문서 (설명서 PDF 는 docs/ 에 있음)
+/*.pdf

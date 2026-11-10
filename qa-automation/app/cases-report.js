@@ -85,6 +85,9 @@ function describeAction(action, target) {
     [/^페이지 이동 → (.+)$/, (m) => [`${target} 클릭`, `${m[1]} 페이지로 이동`]],
     [/^외부 사이트 이동 → (.+)$/, (m) => [`${target} 클릭`, `외부 사이트 ${m[1]} 로 이동 (이동 여부만 확인)`]],
     [/^새 탭 열기 → (.+)$/, (m) => [`${target} 클릭`, `새 탭에서 ${m[1]} 열림`]],
+    [/^새 탭 열기$/, () => [`${target} 클릭`, '새 탭이 열림']],
+    [/^파일 다운로드/, () => [`${target} 클릭`, '파일이 내려받아지고 비어 있지 않음']],
+    [/^목록 페이지 이동$/, () => [`${target} 클릭`, '목록 내용이 해당 페이지로 바뀜']],
     [/^링크 연결/, () => [`${target} 클릭`, '정상 페이지로 연결 (분석 시 연결 실패)']],
     [/^모달\/시트 노출 "(.*)" 후 닫힘$/, (m) => [`${target} 클릭 → 닫기`, `"${m[1]}" 팝업이 열리고 닫기로 닫힘`]],
     [/^(모달\/시트 노출|콘텐츠 노출) "(.*)"$/, (m) => [`${target} 클릭`, `"${m[2]}" 표시`]],
@@ -135,6 +138,26 @@ function describeCheck(check, info) {
   if (name === '이미지 정상 로드') return { small: '이미지', step: '페이지 끝까지 스크롤', expected: '깨진 이미지 없음' };
   if (name === 'JS 런타임 오류 없음') return { small: '스크립트', step: '페이지 접속', expected: 'JS 런타임 오류 없음' };
   if (name.startsWith('표 구조:')) return { small: '표', step: '화면의 표 확인', expected: name.replace(/^표 구조:\s*/, '') };
+  if (name.startsWith('네트워크 요청 실패 없음')) return { small: '네트워크', step: '페이지 접속하며 요청 감시', expected: '같은 사이트 API · 리소스 요청에 404 · 5xx · 연결 실패 없음' };
+  if (/^임베드\(iframe\)/.test(name)) return { small: '임베드', step: '페이지 안 iframe 확인', expected: '임베드가 오류 페이지 없이 로드됨' };
+  if (name === '콘솔 오류 없음') return { small: '콘솔', step: '페이지 접속', expected: 'console.error 없음 (경고만)' };
+  if (name.startsWith('보안:')) return { small: '보안', step: '페이지 접속하며 요청 감시', expected: 'https 페이지에서 http 리소스를 불러오지 않음' };
+  if (name.startsWith('성능:')) return { small: '성능', step: '페이지 접속 후 측정', expected: name.replace(/^성능:\s*/, '') };
+  if (name.startsWith('모바일:')) return { small: '모바일', step: '390×844 화면으로 접속', expected: '화면보다 넓은 요소 없음 (가로 스크롤 없음)' };
+  if (name.startsWith('접근성:')) return { small: '접근성', step: 'axe-core 로 WCAG 2 A/AA 검사', expected: name === '접근성: 위반 없음' ? '위반 없음' : `위반 없어야 함: ${name.replace(/^접근성:\s*/, '')}` };
+  if (name.startsWith('없는 주소')) return { small: '404', step: '존재하지 않는 주소로 접속', expected: '404 상태 또는 "찾을 수 없음" 안내' };
+  if (/^노출: /.test(name)) return { small: '공통 메뉴', step: `이 페이지에서 ${name.replace(/^노출: /, '')} 확인`, expected: '시작 페이지와 같은 헤더 · 메뉴 · 푸터 요소가 보임' };
+  if (name.startsWith('로케이터:')) return { small: '로케이터', step: `${t} 찾기`, expected: '분석 때 이름 그대로 찾아짐 (못 찾으면 대체 로케이터 사용 · 경고)' };
+  if (name.startsWith('입력 검증:')) {
+    const rule = name.replace(/^입력 검증:\s*/, '');
+    const exp = /필수/.test(rule) ? '비워 두면 유효하지 않음(제출 불가)' : /최대/.test(rule) ? `${rule} 넘게 입력되지 않음` : '형식에 맞지 않는 값은 거부, 맞는 값은 허용';
+    return { small: '입력 검증', step: `${t}에 ${/필수/.test(rule) ? '빈 값' : /최대/.test(rule) ? '긴 값' : '잘못된 형식 값'} 입력 (제출하지 않음)`, expected: exp };
+  }
+  if (name.startsWith('마우스 오버 메뉴:')) {
+    const m2 = name.match(/^마우스 오버 메뉴: "(.*)" → (.+)$/);
+    return { small: '호버 메뉴', step: `${t}에 마우스 올리기 → "${m2 ? m2[1] : ''}" 클릭`, expected: `${m2 ? m2[2] : ''} 로 이동` };
+  }
+  if (name.startsWith('흐름:')) return { small: '흐름', step: `${t} 클릭 → 상세 페이지 → 뒤로가기`, expected: '목록 페이지로 돌아오고 목록이 다시 보임' };
   if (name.startsWith('열 구성:')) return { small: '열 구성', step: '표의 머리글 확인', expected: `열이 ${name.replace(/^열 구성:\s*/, '')} 순서로 표시` };
   if (name.startsWith('모든 행의 칸 수')) return { small: '칸 수', step: '표의 모든 행 확인', expected: `모든 행이 ${name.replace(/^.*= /, '')}의 칸을 가짐 (밀리거나 빠진 칸 없음)` };
   let m;
@@ -321,7 +344,7 @@ function buildCasesHtml({ plan, result = {}, screensBase = 'screens' }) {
 </head>
 <body>
 <div class="wrap">
-  <h1>테스트 케이스 <small>${tests ? '실행 결과' : '실행 전'}</small></h1>
+  <h1>테스트 케이스 <small>${tests ? '실행 결과' : '실행 전'}</small>${result.loggedIn ? ' <span class="badge failed" style="font-size:12px;vertical-align:3px">로그인 화면 포함 · 외부 공유 주의</span>' : ''}</h1>
   <div class="sub">${esc(target)} · ${result.mode === 'ai' ? 'AI 테스트' : '규칙 기반 테스트'} · ${scope === 'all' ? '세부 사이트 모두' : '입력한 범위만'}${started ? ` · ${esc(started)}` : ''}${browsers ? ` · ${esc(browsers)}` : ''}</div>
 
   <div class="tiles">
@@ -336,6 +359,14 @@ function buildCasesHtml({ plan, result = {}, screensBase = 'screens' }) {
 
   ${typos.length ? `<section class="typos"><h2>오타 의심 문구 <small>${typos.length}건 · 규칙 기반 검사 (확정 아님)</small></h2><ul>${typos
     .map((t) => `<li>"${esc(t.text)}" <span class="muted">- ${esc((t.reasons || []).join(' / '))}${t.pages ? ` · ${esc(t.pages.join(', '))}` : ''}</span></li>`)
+    .join('')}</ul></section>` : ''}
+
+  ${result.changes ? `<section class="typos" style="background:var(--surface-2)"><h2>이전 실행 대비 변경 <small>${esc(result.changes.prevId)} 실행과 비교</small></h2><p class="muted" style="margin:0 0 6px">페이지 +${result.changes.summary.pagesAdded} / -${result.changes.summary.pagesRemoved} · 요소 +${result.changes.summary.elementsAdded} / -${result.changes.summary.elementsRemoved} · 동작 변경 ${result.changes.summary.actionsChanged} · 문구 +${result.changes.summary.textsAdded} / -${result.changes.summary.textsRemoved}</p><ul>${result.changes.pages
+    .flatMap((p) => p.items.slice(0, 15).map((i) => `<li>${esc(p.path)} · <b>${esc(i.type)}</b> <span class="muted">${esc(i.text)}</span></li>`))
+    .join('')}</ul></section>` : ''}
+
+  ${(result.dataActions || []).length ? `<section class="typos"><h2>데이터가 바뀌었을 수 있는 동작 <small>전체 동작 확인 · ${result.dataActions.length}건</small></h2><ul>${result.dataActions
+    .map((a) => `<li>${esc(a.page)} · "${esc(a.label)}" <span class="muted">→ ${esc(a.effect)}</span></li>`)
     .join('')}</ul></section>` : ''}
 
   <div class="bar">

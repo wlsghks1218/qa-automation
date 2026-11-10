@@ -3,6 +3,10 @@ const fs = require('fs');
 const path = require('path');
 const { short, escapeRegex, locatorCode, urlMatcher, specHeader, textPattern, hasNumber } = require('./lib/codegen');
 const { findTypos } = require('./lib/typo');
+const { version: APP_VERSION } = require('../app/version.json');
+// 분석 재사용 캐시 (앱이 QA_CACHE_DIR 를 넘겨줄 때만). 페이지 URL → { 화면 구조 키, 분석 결과 }
+const CACHE_FILE = process.env.QA_CACHE_DIR ? path.join(process.env.QA_CACHE_DIR, 'analysis-cache.json') : null;
+let analysisCache = null;
 const { buildCasesHtml } = require('../app/cases-report');
 
 // 사용법: node scripts/generate-specs.js <URL> [--scope=all|single]
@@ -285,7 +289,30 @@ async function pageState(page) {
 /** 요소마다 data-qa-idx 를 부여하고 기본 속성 수집 */
 async function collectCandidates(page) {
   return page.evaluate((selector) => {
-    const all = Array.from(document.querySelectorAll(selector));
+    // Shadow DOM(웹 컴포넌트) 안의 요소까지 찾는다
+    const deepAll = (sel) => {
+      const found = [];
+      const walk = (root) => {
+        root.querySelectorAll(sel).forEach((e) => found.push(e));
+        root.querySelectorAll('*').forEach((e) => e.shadowRoot && walk(e.shadowRoot));
+      };
+      walk(document);
+      return found;
+    };
+    // 이름이 바뀌어도 찾을 수 있게 구조 경로(id 기준 nth-of-type)도 기록 → 테스트의 대체 로케이터
+    const cssPath = (el) => {
+      const segs = [];
+      for (let n = el; n && n.nodeType === 1 && n !== document.body && segs.length < 8; n = n.parentElement) {
+        if (n.id && /^[A-Za-z][\w-]*$/.test(n.id) && !/\d{3,}|:r/.test(n.id)) {
+          segs.unshift(`#${n.id}`);
+          return segs.join(' > ');
+        }
+        const same = n.parentElement ? Array.from(n.parentElement.children).filter((c) => c.tagName === n.tagName) : [];
+        segs.unshift(same.length > 1 ? `${n.tagName.toLowerCase()}:nth-of-type(${same.indexOf(n) + 1})` : n.tagName.toLowerCase());
+      }
+      return `body > ${segs.join(' > ')}`;
+    };
+    const all = deepAll(selector);
     const out = [];
     // 화면 순서용 좌표: 화면에 고정된 상단 바는 맨 앞, 하단 탭 메뉴는 맨 뒤로 보낸다
     const posOf = (el) => {
@@ -305,7 +332,13 @@ async function collectCandidates(page) {
       if (el.disabled) return;
 
       el.setAttribute('data-qa-idx', String(idx));
-      const zone = el.closest('header, nav, footer, [role="banner"], [role="navigation"], [role="contentinfo"]');
+      // 공통 영역: 헤더 · 푸터 · 사이트 메뉴. 본문 안 내비게이션(페이지 번호 · 목차 · 탭 목록)은 그 페이지의 기능
+      const zone = (() => {
+        const z = el.closest('header, nav, footer, [role="banner"], [role="navigation"], [role="contentinfo"]');
+        if (!z || z.matches('header, footer, [role="banner"], [role="contentinfo"]')) return z;
+        const label = `${z.getAttribute('aria-label') || ''} ${z.className || ''}`;
+        return z.closest('main, article, [role="main"]') || /pag|페이지|breadcrumb|toc|목차/i.test(label) ? null : z;
+      })();
       const tag = el.tagName.toLowerCase();
       const href = el.getAttribute('href');
       const clean = (t) => (t || '').trim().replace(/\s+/g, ' ');
@@ -398,6 +431,12 @@ async function collectCandidates(page) {
         option,
         selectOptions,
         repeatKey,
+        cssPath: cssPath(el),
+        // 입력 검증 규칙 (필수 · 형식 · 최대 길이)
+        required: !!(el.required || el.getAttribute('aria-required') === 'true'),
+        pattern: el.getAttribute('pattern') || '',
+        maxLength: el.maxLength > 0 && el.maxLength < 100000 ? el.maxLength : 0,
+        download: tag === 'a' && el.hasAttribute('download'),
       });
     });
     return out;
@@ -503,10 +542,31 @@ async function probe(page, spec, noisy, reset) {
 
   // 마우스 오버로 새로 나타나는 문구(툴팁/말풍선/호버 메뉴)
   let tooltip = null;
+  let hoverLinks = [];
+  // 화면에 보이는 링크 목록 (마우스 오버로 새로 나타나는 하위 메뉴 링크를 찾기 위해)
+  const visibleLinks = () =>
+    page
+      .evaluate(() =>
+        Array.from(document.querySelectorAll('a[href]'))
+          .filter((a) => {
+            const r = a.getBoundingClientRect();
+            const s = getComputedStyle(a);
+            return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && Number(s.opacity) > 0.1;
+          })
+          .map((a) => ({ name: (a.innerText || a.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' '), href: a.href, blank: a.target === '_blank' }))
+          .filter((l) => l.name && l.name.length <= 40 && /^https?:/.test(l.href))
+      )
+      .catch(() => []);
   if (!['textbox', 'searchbox', 'spinbutton', 'combobox'].includes(spec.role)) {
     const idle = await pageState(page);
+    const linksBefore = new Set((await visibleLinks()).map((l) => `${l.name}|${l.href}`));
     if (await loc.hover({ timeout: 3000 }).then(() => true).catch(() => false)) {
       await page.waitForTimeout(600);
+      // 호버 메뉴(메가 메뉴): 마우스를 올렸을 때만 보이는 하위 링크 (최대 8개)
+      const seen = new Set();
+      hoverLinks = (await visibleLinks())
+        .filter((l) => !linksBefore.has(`${l.name}|${l.href}`) && !seen.has(l.name) && seen.add(l.name))
+        .slice(0, 8);
       const role = await page.getByRole('tooltip').filter({ visible: true }).first().innerText({ timeout: 300 }).catch(() => '');
       const idleLines = new Set(idle.lines);
       const hovered = await pageState(page);
@@ -535,7 +595,9 @@ async function probe(page, spec, noisy, reset) {
       await page.waitForTimeout(300);
     }
   }
-  const withTip = (effect) => (tooltip ? { ...effect, tooltip } : effect);
+  // 하위 메뉴 링크가 나타났으면 그 메뉴의 문구는 툴팁이 아니다
+  if (hoverLinks.length && tooltip && hoverLinks.some((l) => l.name === tooltip)) tooltip = null;
+  const withTip = (effect) => ({ ...effect, ...(tooltip ? { tooltip } : {}), ...(hoverLinks.length ? { hoverLinks } : {}) });
   let effect = await probeClick(page, loc, spec, noisy);
   // 드롭다운이 열렸으면 옵션을 하나씩 눌러 동작 확인
   if (effect.type === 'dropdownOpen') effect = reset ? await probeDropdownOptions(page, spec, effect, reset) : { type: 'none', dirty: true };
@@ -619,6 +681,8 @@ const NONE_TERM = 'zzqx없는검색어9';
 const EMPTY_RE = /없|no (result|data|match)|not found|empty/i;
 const SEARCH_HINT = /검색|search|찾기|조회|filter|필터/i;
 const OPTION_SEL = '[role="option"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"]';
+// 페이지네이션 버튼 이름 (다음 · 이전 · 처음 · 마지막 · 페이지 번호)
+const PAGER = /^(다음|이전|처음|마지막|다음 페이지|이전 페이지|next|prev|previous|first|last|next page|previous page|›|»|‹|«|>|<|>>|<<|\d{1,3})$/i;
 
 /** 검색창: 목록의 실제 값으로 검색 → 결과가 그 값만 남는지, 없는 값 검색 → 결과 없음인지 */
 async function probeSearch(page, loc) {
@@ -683,18 +747,34 @@ async function probeClick(page, loc, spec, noisy) {
   const expandedBefore = await loc.getAttribute('aria-expanded', { timeout: 1000 }).catch(() => null);
   const rowsBefore = await tableRowsOf(loc);
   const optionsBefore = await page.locator(OPTION_SEL).filter({ visible: true }).count().catch(() => 0);
+  // 페이지네이션 후보: 다음/이전/숫자 버튼 → 누른 뒤 목록 내용이 바뀌는지
+  const pagerLike = PAGER.test(spec.name || '');
+  const listBefore = pagerLike ? (await page.evaluate(listRowsInPage).catch(() => [])).join('|') : '';
 
   let popup = null;
+  let download = null;
   const onPopup = (p) => (popup = p);
+  const onDownload = (d) => (download = d);
   page.on('popup', onPopup);
+  page.on('download', onDownload);
   try {
     await loc.click({ timeout: 5000 });
   } catch (e) {
     page.off('popup', onPopup);
+    page.off('download', onDownload);
     return { type: 'unclickable', reason: e.message.split('\n')[0], dirty: true };
   }
   await page.waitForTimeout(1500);
   page.off('popup', onPopup);
+  page.off('download', onDownload);
+
+  // 파일 다운로드 (엑셀 다운로드 등): 파일 이름 기록, 테스트에서 파일이 비어 있지 않은지 확인
+  if (download) {
+    const filename = download.suggestedFilename();
+    await download.cancel().catch(() => {});
+    if (popup) await popup.close().catch(() => {});
+    return { type: 'download', filename, dirty: false };
+  }
 
   if (popup) {
     await popup.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
@@ -710,6 +790,12 @@ async function probeClick(page, loc, spec, noisy) {
     // 직접 연 페이지에서 '뒤로가기' 등은 about:blank 로 간다 → 테스트로 재현할 의미가 없음
     if (!/^https?:/.test(page.url())) return { type: 'none', dirty: true };
     return { type: 'navigate', url: page.url(), dirty: true };
+  }
+
+  // 페이지네이션: 주소는 그대로인데 목록 내용이 바뀜
+  if (pagerLike && listBefore) {
+    const listAfter = (await page.evaluate(listRowsInPage).catch(() => [])).join('|');
+    if (listAfter && listAfter !== listBefore) return { type: 'paginate', dirty: true };
   }
 
   // 드롭다운/메뉴: 클릭 후 옵션(option · menuitem)이 새로 나타났으면 옵션 목록을 기록 (옵션별 동작은 probe 에서 확인)
@@ -809,7 +895,13 @@ async function isFindableText(page, text) {
 async function collectScreenItems(page) {
   return page.evaluate((selector) => {
     const clean = (t) => (t || '').trim().replace(/\s+/g, ' ');
-    const zoneOf = (el) => (el.closest('header, nav, footer, [role="banner"], [role="navigation"], [role="contentinfo"]') ? 'common' : 'main');
+    const zoneOf = (el) => {
+      const z = el.closest('header, nav, footer, [role="banner"], [role="navigation"], [role="contentinfo"]');
+      if (!z) return 'main';
+      if (z.matches('header, footer, [role="banner"], [role="contentinfo"]')) return 'common';
+      const label = `${z.getAttribute('aria-label') || ''} ${z.className || ''}`;
+      return z.closest('main, article, [role="main"]') || /pag|페이지|breadcrumb|toc|목차/i.test(label) ? 'main' : 'common';
+    };
     // 화면 순서용 좌표 (collectCandidates 와 동일): 고정 상단 바는 맨 앞, 고정 하단 메뉴는 맨 뒤
     const posOf = (el) => {
       const r = el.getBoundingClientRect();
@@ -827,7 +919,15 @@ async function collectScreenItems(page) {
     const texts = [];
     const images = [];
     const taken = new Set();
-    for (const el of document.body.querySelectorAll('*')) {
+    // Shadow DOM(웹 컴포넌트) 안의 문구까지
+    const deepEls = [];
+    const walk = (root) =>
+      root.querySelectorAll('*').forEach((e) => {
+        deepEls.push(e);
+        if (e.shadowRoot) walk(e.shadowRoot);
+      });
+    walk(document.body);
+    for (const el of deepEls) {
       if (/^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|OPTION)$/.test(el.tagName)) continue;
       // 클릭 요소 안의 문구/이미지는 그 요소의 '문구' 검사에서 확인한다
       if (el.closest(selector)) continue;
@@ -977,13 +1077,14 @@ async function analyzePage(newContext, pagePath, { commonSignatures, collectComm
   const tag = pagePath;
   const step = (msg) => console.log(`   · [${tag}] ${msg}`);
   const url = urlOfTarget(pagePath);
+  let cacheKey = null;
   // 페이지마다 새 브라우저 컨텍스트: 다른 페이지 분석 중 누른 버튼(사이드바 접기 등)이 남긴 상태가 섞이지 않게
   const context = await newContext();
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
 
-  const result = { path: pagePath, url, title: '', status: 0, keyTexts: [], texts: [], images: [], rolling: [], tables: [], pageType: 'general', features: [], common: [], skipped: [], errors };
+  const result = { path: pagePath, url, title: '', status: 0, keyTexts: [], texts: [], images: [], rolling: [], tables: [], iframes: [], dataActions: [], pageType: 'general', features: [], common: [], skipped: [], errors };
 
   // 처음 연 상태(쿠키 · localStorage · sessionStorage)를 기억해두고, 클릭 탐지 후마다 이 상태로 되돌린다.
   // 생성된 테스트는 매번 새 브라우저에서 시작하므로, 분석도 같은 상태에서 관찰해야 결과가 어긋나지 않는다.
@@ -1030,6 +1131,28 @@ async function analyzePage(newContext, pagePath, { commonSignatures, collectComm
       .screenshot({ type: 'jpeg', quality: 60, fullPage: true, clip: { x: 0, y: 0, width: VIEWPORT.width, height: Math.min(height, 6000) } })
       .catch(() => null);
 
+    // 분석 재사용: 화면 구조(클릭 요소 · 제목 · 링크 목적지, 숫자 제외)가 이전 분석과 같으면 클릭 탐지를 다시 하지 않는다
+    if (analysisCache) {
+      const structure = await page
+        .evaluate(() => {
+          const shape = (t) => (t || '').trim().replace(/\s+/g, ' ').replace(/\d+/g, '#').slice(0, 60);
+          return Array.from(document.querySelectorAll('a[href], button, [role="button"], [role="tab"], input, select, textarea, summary, h1, h2, h3'))
+            .map((e) => `${e.tagName}|${shape(e.getAttribute('href'))}|${shape(e.innerText || e.getAttribute('aria-label') || e.getAttribute('placeholder'))}`)
+            .join('\n');
+        })
+        .catch(() => '');
+      cacheKey = require('crypto')
+        .createHash('md5')
+        .update([APP_VERSION, STORAGE_STATE ? 'login' : '', CLICK_ALL ? 'all' : '', collectCommon, commonAsFeatures, structure].join('\n'))
+        .digest('hex');
+      const hit = analysisCache[url];
+      if (hit && hit.key === cacheKey) {
+        step('화면 구조가 이전 분석과 같아 이전 분석 결과를 재사용 (클릭 탐지 생략)');
+        Object.assign(result, hit.result, { status: result.status, title: result.title, shot: result.shot, errors, cached: true });
+        return result;
+      }
+    }
+
     // 동적으로 바뀌는 텍스트(카운트다운, 시세 등)는 단언 대상에서 제외
     const s1 = await pageState(page);
     await page.waitForTimeout(1500);
@@ -1050,6 +1173,19 @@ async function analyzePage(newContext, pagePath, { commonSignatures, collectComm
       const layout = await t.evaluate(tableLayoutInPage).catch(() => null);
       if (rows > 0) result.tables.push({ nth: i, columns, rows, ...(layout && layout.heads.length >= 2 && layout.rows >= 1 ? { layout } : {}) });
     }
+
+    // 임베드(iframe): 지도 · 결제 · 영상 · 채팅 위젯 등. 안의 요소까지는 분석하지 않고 정상 로드만 확인
+    result.iframes = await page
+      .evaluate(() =>
+        Array.from(document.querySelectorAll('iframe'))
+          .filter((f) => {
+            const r = f.getBoundingClientRect();
+            return r.width > 20 && r.height > 20;
+          })
+          .map((f) => ({ src: f.src || '', title: (f.title || f.name || '').trim() }))
+          .slice(0, 10)
+      )
+      .catch(() => []);
 
     // 화면 구조로 페이지 유형 판별 (URL 규칙이 아니라 실제 구성 요소 기준)
     const signals = await page.evaluate(() => {
@@ -1160,7 +1296,12 @@ async function analyzePage(newContext, pagePath, { commonSignatures, collectComm
         .filter((t) => !noisy.has(t) && !/^[\d\s.,:%+\-$₩()/]+$/.test(t))
         // 이름 끝 숫자 배지가 있는 요소(… 1)는 문구 확인에서도 숫자를 뺀다
         .map((t) => (spec.kind === 'roleBadge' ? t.replace(/\s+\d+\+?$/, '') : t));
-      const base = { label, signature, locator: spec, href: cand.href, kind: kindOf(cand, spec), lines, hasImg: cand.hasImg, pos: cand.pos, ...(repeatCount ? { repeatCount } : {}) };
+      // fallbacks: 이름이 바뀌어도 찾을 수 있는 대체 로케이터 (태그+문구 → 구조 경로)
+      const fallbacks = [
+        ...(spec.kind !== 'text' && lines[0] ? [{ kind: 'text', tag: cand.tag, name: lines[0] }] : []),
+        ...(cand.cssPath ? [{ kind: 'css', selector: cand.cssPath }] : []),
+      ];
+      const base = { label, signature, locator: spec, fallbacks, pageUrl: url, href: cand.href, kind: kindOf(cand, spec), lines, hasImg: cand.hasImg, pos: cand.pos, ...(repeatCount ? { repeatCount } : {}) };
       const before = result[bucket].length;
       const where = collectCommon && bucket === 'common' ? '공통 ' : '';
       const report = (how) => {
@@ -1197,7 +1338,7 @@ async function analyzePage(newContext, pagePath, { commonSignatures, collectComm
           report('검색 확인');
         } else {
           if (isSearch) await resetState();
-          result[bucket].push({ ...base, type: 'input', inputType: cand.type || 'text', formButton: cand.formButton });
+          result[bucket].push({ ...base, type: 'input', inputType: cand.type || 'text', formButton: cand.formButton, required: cand.required, pattern: cand.pattern, maxLength: cand.maxLength });
           report('입력 확인');
         }
         continue;
@@ -1227,12 +1368,21 @@ async function analyzePage(newContext, pagePath, { commonSignatures, collectComm
         result[bucket].push({ ...base, type: 'display', reason: `분석 중 클릭 불가: ${short(effect.reason, 60)}`, ...(effect.tooltip ? { tooltip: effect.tooltip } : {}) });
       } else {
         result[bucket].push({ ...base, ...effect });
+        // 전체 동작 확인으로 실제 데이터를 바꿨을 수 있는 클릭은 따로 기록 (결과 화면 · analysis.json)
+        if (CLICK_ALL && (DATA_CHANGING.test(label) || BASE_RISKY.test(label) || cand.type === 'submit')) {
+          result.dataActions.push({ label: short(String(label), 40), effect: TYPE_LABEL[effect.type] || effect.type });
+        }
       }
       report(`${effect.tooltip ? `마우스 오버 "${short(effect.tooltip, 15)}" · ` : ''}${effect.type === 'unclickable' ? `클릭 불가(${short(effect.reason, 40)})` : '클릭'}`);
 
       if (effect.dirty) {
         await resetState();
       }
+    }
+    // 다음 실행에서 재사용할 수 있게 저장 (화면 캡처 · 오류 목록 제외)
+    if (analysisCache && cacheKey && !result.cached) {
+      const { shot, errors: _e, cached: _c, ...rest } = result;
+      analysisCache[url] = { key: cacheKey, savedAt: new Date().toISOString(), result: rest };
     }
   } catch (e) {
     result.skipped.push({ reason: `페이지 분석 실패: ${e.message.split('\n')[0]}` });
@@ -1266,6 +1416,8 @@ const TYPE_LABEL = {
   search: '검색',
   dropdown: '드롭다운 옵션',
   sort: '표 정렬',
+  download: '파일 다운로드',
+  paginate: '목록 페이지 이동',
   display: '노출·문구만 확인',
 };
 
@@ -1289,6 +1441,20 @@ function actionCode(f) {
       const action = !isSameSite(u) ? `외부 사이트 이동 → ${u.host}` : external ? `페이지 이동 → ${u.host}${u.pathname}` : `페이지 이동 → ${u.pathname}`;
       return { action, body };
     }
+    case 'download':
+      // 파일 다운로드: 다운로드가 시작되고 파일이 비어 있지 않은지
+      body.push(`const downloadPromise = page.waitForEvent('download');`);
+      body.push(`await target.click();`);
+      body.push(`const download = await downloadPromise;`);
+      body.push(`const file = await download.path();`);
+      body.push(`expect((await import('fs')).statSync(file).size, '내려받은 파일이 비어 있음').toBeGreaterThan(0);`);
+      return { action: `파일 다운로드${f.filename ? ` "${q(f.filename, 30)}"` : ''}`, body };
+    case 'paginate':
+      // 페이지네이션: 누르면 목록 내용이 바뀌는지
+      body.push(`const before = (await listRows(page)).join('|');`);
+      body.push(`await target.click();`);
+      body.push(`await expect.poll(async () => (await listRows(page)).join('|'), { message: '눌러도 목록이 바뀌지 않음' }).not.toBe(before);`);
+      return { action: '목록 페이지 이동', body };
     case 'brokenLink':
       // 분석 시 연결에 실패한 링크: 정상 페이지로 열리는지 검증 (지금 상태면 실패로 보고됨)
       body.push(`await target.click();`);
@@ -1381,13 +1547,67 @@ function elementTest(f, no, typos) {
   const rep = f.repeatCount ? ` · 목록 ${f.repeatCount}개 중 대표` : '';
   out.push(`  test(${JSON.stringify(`${num(no)}. ${f.kind} "${q(shownName)}"${rep} (${f.id})`)}, async ({ page }) => {`);
   out.push(`    const { errors } = await openPage(page, TARGET_URL);`);
-  out.push(`    const target = ${locatorCode(f.locator)};`);
   out.push(`    const c = checks();`);
+  // 기본 로케이터로 못 찾으면 대체 로케이터(문구 → 구조 경로)로 찾고 경고만 남긴다 (이름이 조금 바뀐 경우)
+  const fallbacks = (f.fallbacks || []).map((fb) => locatorCode({ ...fb, nth: 0 }));
+  if (fallbacks.length) {
+    const FB = { text: '화면 문구', css: '구조 경로' };
+    out.push(`    const { target, used } = await firstFound(page, [${[locatorCode(f.locator), ...fallbacks].join(', ')}]);`);
+    out.push(`    c.soft('로케이터: 기본 이름으로 찾음', used === 0, \`기본 로케이터로 못 찾아 대체 로케이터(\${${JSON.stringify(['', ...(f.fallbacks || []).map((fb) => FB[fb.kind])])}[used]})로 찾음 — 이름이나 문구가 바뀌었을 수 있음\`);`);
+  } else {
+    out.push(`    const target = ${locatorCode(f.locator)};`);
+  }
   out.push(`    await c.run('노출', async () => { await expect(target).toBeVisible(); }, { gate: true });`);
   // 요소 안 문구는 줄마다 따로 확인 (버튼 문구 / 말풍선 문구 / 배너 제목·설명이 각각 결과로 보이도록)
   for (const l of f.lines || []) {
     out.push(`    await c.run(${JSON.stringify(`문구: "${q(l, 40)}"${hasNumber(l) ? ' (숫자는 형식만 확인)' : ''}`)}, async () => { await expect(target).toContainText(${textPattern(l, false)}); });`);
     if (typos.has(l)) out.push(`    c.warn(${JSON.stringify(l)}, ${JSON.stringify(typos.get(l))});`);
+  }
+  // 입력 검증 규칙: 제출하지 않고 브라우저의 유효성 검사(checkValidity)로 확인 → 데이터가 바뀌지 않는다
+  if (f.type === 'input' || f.type === 'search') {
+    const valid = `await target.evaluate((e) => (e as HTMLInputElement).checkValidity())`;
+    if (f.required) {
+      out.push(`    await c.run('입력 검증: 필수 입력 (비우면 제출 불가)', async () => { await target.fill(''); expect(${valid}, '비어 있어도 유효한 값으로 처리됨').toBe(false); });`);
+    }
+    const BAD = { email: ['이메일', 'not-an-email'], url: ['URL', 'not a url'] }[f.inputType];
+    if (BAD) {
+      out.push(`    await c.run(${JSON.stringify(`입력 검증: ${BAD[0]} 형식 (잘못된 값 거부)`)}, async () => {`);
+      out.push(`      await target.fill(${JSON.stringify(BAD[1])});`);
+      out.push(`      expect(${valid}, '잘못된 형식이 유효한 값으로 처리됨').toBe(false);`);
+      out.push(`      await target.fill(${JSON.stringify(SAMPLE_INPUT[f.inputType])});`);
+      out.push(`      expect(${valid}, '올바른 형식이 거부됨').toBe(true);`);
+      out.push(`    });`);
+    }
+    if (f.pattern) {
+      out.push(`    await c.run('입력 검증: 정해진 형식(pattern) 외 값 거부', async () => { await target.fill('!@#$%^'); expect(${valid}, '형식에 맞지 않는 값이 유효로 처리됨').toBe(false); });`);
+    }
+    if (f.maxLength) {
+      out.push(`    await c.run(${JSON.stringify(`입력 검증: 최대 ${f.maxLength}자`)}, async () => {`);
+      out.push(`      await target.fill('').catch(() => {});`);
+      out.push(`      await target.pressSequentially('가'.repeat(${f.maxLength + 5}), { delay: 0 });`);
+      out.push(`      expect((await target.inputValue()).length, '최대 길이보다 길게 입력됨').toBeLessThanOrEqual(${f.maxLength});`);
+      out.push(`    });`);
+    }
+  }
+  // 마우스 오버 메뉴(메가 메뉴)의 하위 링크: 올리면 나타나고, 누르면 이동하는지
+  for (const l of f.hoverLinks || []) {
+    const u = new URL(l.href);
+    out.push(`    await c.run(${JSON.stringify(`마우스 오버 메뉴: "${q(l.name, 20)}" → ${isSameSite(u) ? u.pathname : u.host}`)}, async () => {`);
+    out.push(`      await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded' });`);
+    out.push(`      await page.waitForTimeout(800);`);
+    out.push(`      await target.hover();`);
+    out.push(`      const link = page.getByRole('link', { name: ${JSON.stringify(l.name)}, exact: true }).filter({ visible: true }).first();`);
+    if (l.blank) {
+      out.push(`      const popupPromise = page.waitForEvent('popup');`);
+      out.push(`      await link.click();`);
+      out.push(`      const popup = await popupPromise;`);
+      out.push(`      await expect(popup).toHaveURL(${urlMatcher(l.href, true)});`);
+      out.push(`      await popup.close();`);
+    } else {
+      out.push(`      await link.click();`);
+      out.push(`      await expect(page).toHaveURL(${urlMatcher(l.href, u.origin !== BASE_URL)});`);
+    }
+    out.push(`    });`);
   }
   if (f.hasImg) {
     out.push(`    await c.run('이미지 로드', async () => {`);
@@ -1465,6 +1685,18 @@ function elementTest(f, no, typos) {
     out.push(`    await c.run(${JSON.stringify(`동작: ${action}`)}, async () => {`);
     body.forEach((l) => out.push(`      ${l}`));
     out.push(`    });`);
+    // 흐름: 목록 대표 링크 → 상세 페이지 → 뒤로가기 → 목록으로 돌아오는지
+    if (f.repeatCount && f.type === 'navigate' && new URL(f.url).origin === BASE_URL) {
+      out.push(`    await c.run('흐름: 목록 → 상세 → 뒤로가기 → 목록 복귀', async () => {`);
+      out.push(`      await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded' });`);
+      out.push(`      await page.waitForTimeout(800);`);
+      out.push(`      await target.click();`);
+      out.push(`      await expect(page).toHaveURL(${urlMatcher(f.url, false)});`);
+      out.push(`      await page.goBack();`);
+      out.push(`      await expect(page).toHaveURL(${urlMatcher(f.pageUrl || BASE_URL, false)});`);
+      out.push(`      await expect(target, '뒤로가기 후 목록이 보이지 않음').toBeVisible();`);
+      out.push(`    });`);
+    }
   }
   out.push(`    void errors;`);
   out.push(`    c.done();`);
@@ -1552,39 +1784,108 @@ function rollingTest(g, no, typos) {
  * 페이지 하나의 spec: 화면 위→아래 순서로
  * 클릭 요소(노출·문구·동작) / 일반 문구·이미지 묶음 / 롤링 배너 케이스를 나열한다.
  */
-function specSource({ describeTitle, page, features, typos }) {
-  const out = specHeader({ describeTitle, env: ENV, supportPath: '../support/site', generator: 'scripts/generate-specs.js' });
+/** 페이지 단위 점검 케이스: 로드 · 네트워크 · 성능 · 임베드 / 모바일 / 접근성 / 404 / 공통 메뉴 */
+function pageLevelTests(page, { isStart, commonFeatures }) {
+  const out = [];
   out.push(``);
-  out.push(`  const TARGET_URL = ${JSON.stringify(page.url)};`);
-
-  out.push(``);
-  out.push(`  test('00. 페이지 로드 (HTTP 상태 · 이미지 · JS 오류)', async ({ page }) => {`);
-  out.push(`    const { response, errors } = await openPage(page, TARGET_URL);`);
-  out.push(`    await test.step('HTTP 응답 정상', async () => {`);
-  out.push(`      expect(response?.status() ?? 0).toBeLessThan(400);`);
-  out.push(`    });`);
+  out.push(`  test('00. 페이지 로드 (HTTP · 이미지 · JS 오류 · 네트워크 · 성능)', async ({ page }) => {`);
+  out.push(`    const { response, errors, network, consoleErrors, mixed } = await openPage(page, TARGET_URL);`);
+  out.push(`    const c = checks();`);
+  out.push(`    await c.run('HTTP 응답 정상', async () => { expect(response?.status() ?? 0).toBeLessThan(400); });`);
   if (page.blocked) {
     // 분석 시 접속이 차단된 페이지: 차단이 풀렸는지만 확인하고 나머지는 생략
-    out.push(`    await test.step('봇 차단/보안 확인 페이지가 아님', async () => {`);
+    out.push(`    await c.run('봇 차단/보안 확인 페이지가 아님', async () => {`);
     out.push(`      await expect(page.getByText(${BOT_CHECK.toString()}).first(), ${JSON.stringify(`분석 시 접속 차단됨 (${page.blocked}). 사이트가 자동화 접근을 막고 있습니다.`)}).toHaveCount(0);`);
     out.push(`    });`);
+    out.push(`    c.done();`);
     out.push(`  });`);
-    return [...out, `});`, ``].join('\n');
+    return out;
   }
   for (const t of page.tables || []) {
-    out.push(`    await test.step(${JSON.stringify(`표 구조: ${t.nth + 1}번째 표 (컬럼 ${t.columns}개, 데이터 행 있음)`)}, async () => {`);
+    out.push(`    await c.run(${JSON.stringify(`표 구조: ${t.nth + 1}번째 표 (컬럼 ${t.columns}개, 데이터 행 있음)`)}, async () => {`);
     out.push(`      const table = page.getByRole('table').nth(${t.nth});`);
     if (t.columns) out.push(`      await expect(table.getByRole('columnheader')).toHaveCount(${t.columns});`);
     out.push(`      expect(await table.getByRole('row').count()).toBeGreaterThan(${t.columns ? 1 : 0});`);
     out.push(`    });`);
   }
-  out.push(`    await test.step('이미지 정상 로드', async () => {`);
-  out.push(`      await expectNoBrokenImages(page);`);
-  out.push(`    });`);
-  out.push(`    await test.step('JS 런타임 오류 없음', async () => {`);
-  out.push(`      expect.soft(errors).toEqual([]);`);
-  out.push(`    });`);
+  out.push(`    await c.run('이미지 정상 로드', async () => { expect(await brokenImages(page), '깨진 이미지').toEqual([]); });`);
+  out.push(`    await c.run('JS 런타임 오류 없음', async () => { expect(errors).toEqual([]); });`);
+  // 화면에 안 보이는 API · 리소스 실패도 잡는다 (같은 사이트의 404 · 5xx · 연결 실패)
+  out.push(`    await c.run('네트워크 요청 실패 없음 (같은 사이트 404 · 5xx)', async () => { expect([...new Set(network)], \`실패한 요청: \${[...new Set(network)].slice(0, 3).join(' / ')}\`).toEqual([]); });`);
+  if (page.iframes && page.iframes.length) {
+    out.push(`    await c.run(${JSON.stringify(`임베드(iframe) ${page.iframes.length}개 정상 로드`)}, async () => {`);
+    out.push(`      const bad = page.frames().filter((f) => f !== page.mainFrame() && /^chrome-error:/.test(f.url())).map((f) => f.url() || f.name());`);
+    out.push(`      expect(bad, '오류 페이지로 열린 임베드').toEqual([]);`);
+    out.push(`    });`);
+  }
+  out.push(`    c.soft('콘솔 오류 없음', consoleErrors.length === 0, [...new Set(consoleErrors)].slice(0, 3).join(' / '));`);
+  out.push(`    c.soft('보안: https 페이지에 http 리소스 없음', mixed.length === 0, [...new Set(mixed)].slice(0, 3).join(' / '));`);
+  // 성능 기준: LCP 4초(Core Web Vitals '나쁨' 경계) · 전체 로드 10초. 초과하면 경고
+  out.push(`    const perf = await perfMetrics(page);`);
+  out.push(`    c.soft('성능: 주요 콘텐츠 표시(LCP) 4초 이내', !perf.lcp || perf.lcp <= 4000, \`LCP \${(perf.lcp / 1000).toFixed(1)}초\`);`);
+  out.push(`    c.soft('성능: 페이지 전체 로드 10초 이내', !perf.load || perf.load <= 10000, \`로드 \${(perf.load / 1000).toFixed(1)}초\`);`);
+  out.push(`    c.done();`);
   out.push(`  });`);
+
+  // 모바일 화면: 가로 스크롤(레이아웃 넘침) 없는지
+  out.push(``);
+  out.push(`  test('00-1. 모바일 화면(390×844) 레이아웃', async ({ page }) => {`);
+  out.push(`    await page.setViewportSize({ width: 390, height: 844 });`);
+  out.push(`    await openPage(page, TARGET_URL);`);
+  out.push(`    const c = checks();`);
+  out.push(`    const o = await mobileOverflow(page);`);
+  out.push(`    await c.run('모바일: 가로로 넘치는 요소 없음 (가로 스크롤 없음)', async () => { expect(o.overflow, \`화면보다 \${o.overflow}px 넓음: \${o.wide.join(' / ')}\`).toBeLessThanOrEqual(1); });`);
+  out.push(`    c.done();`);
+  out.push(`  });`);
+
+  // 접근성: 위반은 실패가 아니라 경고 (사이트 대부분에 있어 실패로 두면 결과가 묻힌다)
+  out.push(``);
+  out.push(`  test('00-2. 접근성 점검 (WCAG 2 A/AA)', async ({ page }) => {`);
+  out.push(`    await openPage(page, TARGET_URL);`);
+  out.push(`    const c = checks();`);
+  out.push(`    const violations = await axeScan(page).catch(() => null);`);
+  out.push(`    if (violations === null) c.skip('접근성 점검', '접근성 검사 도구를 실행하지 못함');`);
+  out.push(`    else if (!violations.length) c.soft('접근성: 위반 없음', true);`);
+  out.push(`    else for (const v of violations.slice(0, 10)) c.soft(\`접근성: \${v.help} (\${v.impact})\`, false, \`\${v.count}곳 · 규칙 \${v.id} · 예: \${v.target}\`);`);
+  out.push(`    c.done();`);
+  out.push(`  });`);
+
+  // 시작 페이지: 없는 주소를 열었을 때 404 안내가 나오는지
+  if (isStart) {
+    out.push(``);
+    out.push(`  test('00-3. 없는 주소 → 404 안내', async ({ page }) => {`);
+    out.push(`    const res = await page.goto(new URL('/qa-not-found-zzqx-404', TARGET_URL).href, { waitUntil: 'domcontentloaded' });`);
+    out.push(`    await page.waitForTimeout(1500);`);
+    out.push(`    const c = checks();`);
+    out.push(`    const status = res?.status() ?? 0;`);
+    out.push(`    const text = await page.locator('body').innerText().catch(() => '');`);
+    out.push(`    c.soft('없는 주소 → 404 상태 또는 안내 문구', status >= 400 || /404|찾을 수 없|존재하지 않|없는 페이지|not found/i.test(text), \`HTTP \${status} · 404 안내 없이 다른 화면이 표시됨\`);`);
+    out.push(`    c.done();`);
+    out.push(`  });`);
+  }
+
+  // 세부 페이지: 시작 페이지에서 확인한 헤더 · 메뉴 · 푸터가 이 페이지에도 보이는지 (노출만)
+  if (!isStart && commonFeatures && commonFeatures.length) {
+    out.push(``);
+    out.push(`  test(${JSON.stringify(`00-4. 공통 메뉴 노출 (헤더 · 메뉴 · 푸터 ${Math.min(commonFeatures.length, 12)}개)`)}, async ({ page }) => {`);
+    out.push(`    await openPage(page, TARGET_URL);`);
+    out.push(`    const c = checks();`);
+    for (const f of commonFeatures.slice(0, 12)) {
+      const shown = f.lines && f.lines.length ? f.lines.join(' ') : f.label;
+      out.push(`    await c.run(${JSON.stringify(`노출: ${f.kind} "${q(shown, 25)}"`)}, async () => { await expect(${locatorCode(f.locator)}).toBeVisible(); });`);
+    }
+    out.push(`    c.done();`);
+    out.push(`  });`);
+  }
+  return out;
+}
+
+function specSource({ describeTitle, page, features, typos, isStart = false, commonFeatures = [] }) {
+  const out = specHeader({ describeTitle, env: ENV, supportPath: '../support/site', generator: 'scripts/generate-specs.js' });
+  out.push(``);
+  out.push(`  const TARGET_URL = ${JSON.stringify(page.url)};`);
+  out.push(...pageLevelTests(page, { isStart, commonFeatures }));
+  if (page.blocked) return [...out, `});`, ``].join('\n');
 
   // 화면 순서 정렬 (위→아래, 같은 줄이면 왼쪽→오른쪽)
   const items = [
@@ -1647,6 +1948,8 @@ function planFromSource(src) {
     else if ((m = line.match(new RegExp(`^\\s+c\\.skip\\(${STR}, ${STR}\\)`)))) cur.checks.push({ name: lit(m[1]), kind: 'skip', detail: lit(m[2]) });
     else if ((m = line.match(new RegExp(`^\\s+c\\.warn\\(${STR}, (\\[.*\\])\\);`)))) cur.checks.push({ name: `오타 의심: "${lit(m[1])}"`, kind: 'warn', detail: JSON.parse(m[2]).join(' / ') });
     else if ((m = line.match(new RegExp(`^\\s+await test\\.step\\(${STR}`)))) cur.checks.push({ name: lit(m[1]), kind: 'step' });
+    // 경고형 점검(성능 · 콘솔 · 404 등). 이름이 실행 때 정해지는 접근성 항목은 결과에서 추가된다
+    else if ((m = line.match(new RegExp(`^\\s+c\\.soft\\(${STR}`)))) cur.checks.push({ name: lit(m[1]), kind: 'soft' });
   }
   return cases;
 }
@@ -1680,6 +1983,13 @@ function slugOf(pagePath) {
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       ...(STORAGE_STATE ? { storageState: STORAGE_STATE } : {}),
     });
+  if (CACHE_FILE) {
+    try {
+      analysisCache = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8'));
+    } catch {
+      analysisCache = {};
+    }
+  }
   const context = await newContext(); // 페이지 발굴용
   if (STORAGE_STATE) console.log('[로그인] 저장된 로그인 상태로 분석합니다.');
 
@@ -1728,6 +2038,12 @@ function slugOf(pagePath) {
     return r;
   });
   await browser.close();
+  if (CACHE_FILE && analysisCache) {
+    fs.mkdirSync(path.dirname(CACHE_FILE), { recursive: true });
+    fs.writeFileSync(CACHE_FILE, JSON.stringify(analysisCache), 'utf-8');
+    const reused = [home, ...subs].filter((r) => r.cached).length;
+    if (reused) console.log(`  -> 화면 구조가 그대로인 ${reused}개 페이지는 이전 분석을 재사용했습니다.`);
+  }
 
   console.log(`\n[4/4] 오타 의심 검사 + 화면 순서대로 테스트 케이스 작성...`);
   const all = [home, ...subs];
@@ -1759,7 +2075,9 @@ function slugOf(pagePath) {
     // 시작 페이지에는 헤더/메뉴/푸터 공통 요소까지 화면 순서대로 포함한다 (다른 페이지는 본문만)
     const features = i === 0 ? [...commonFeatures, ...r.features] : r.features;
     const describeTitle = `[페이지 · ${PAGE_TYPE_LABEL[r.pageType]}] ${r.path}${r.title ? ` - ${r.title}` : ''}`;
-    const src = specSource({ describeTitle, page: r, features, typos });
+    // 같은 호스트의 세부 페이지는 시작 페이지의 헤더 · 메뉴 · 푸터가 보이는지도 확인
+    const sameHost = new URL(r.url).host === new URL(home.url).host;
+    const src = specSource({ describeTitle, page: r, features, typos, isStart: i === 0, commonFeatures: i > 0 && sameHost ? commonFeatures : [] });
     write(`${String(i + 1).padStart(2, '0')}-${slugOf(r.path)}.spec.ts`, src);
     planPages.push({
       group: describeTitle,
@@ -1774,7 +2092,7 @@ function slugOf(pagePath) {
   // 분석 결과 원본 저장 (기획서 매핑 · AI 분석 · 결과 화면에서 사용)
   const strip = (list) => list.map(({ signature, ...f }) => f);
   fs.mkdirSync(path.join(OUTPUT_DIR, 'screens'), { recursive: true });
-  const pages = all.map(({ path: p, url, title, status, blocked, keyTexts, texts, images, rolling, tables, pageType, features, skipped, errors, shot }, i) => {
+  const pages = all.map(({ path: p, url, title, status, blocked, keyTexts, texts, images, rolling, tables, iframes, dataActions, pageType, features, skipped, errors, shot, cached }, i) => {
     const screenshot = shot ? `screens/${pid(i + 1)}.jpg` : null;
     if (shot) fs.writeFileSync(path.join(OUTPUT_DIR, screenshot), shot);
     return {
@@ -1794,6 +2112,9 @@ function slugOf(pagePath) {
       features: strip(features),
       skipped,
       errors,
+      iframes: iframes || [],
+      dataActions: dataActions || [],
+      ...(cached ? { cached: true } : {}),
     };
   });
   const typoList = [];
