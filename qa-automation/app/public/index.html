@@ -133,6 +133,9 @@
   .progress.show { display: block; }
   .phase { display: flex; align-items: center; gap: 10px; font-weight: 600; }
   .stop-btn { margin-left: auto; color: var(--fail); border-color: var(--fail); }
+  .baseline-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; background: var(--surface-2, #f1f3f5); color: var(--text); margin-top: 10px; }
+  .baseline-bar .ghost { margin-left: auto; }
+  .cov-low { color: var(--fail); }
   .pbar-wrap { margin-top: 14px; }
   .pbar-label { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; color: var(--muted); margin-bottom: 6px; font-variant-numeric: tabular-nums; }
   .pbar-label b { color: var(--text); }
@@ -372,6 +375,10 @@
 
     <div class="field">
       <span class="label">동작 확인 범위</span>
+      <div id="baselineField" hidden style="margin-bottom:10px">
+        <div class="login-row"><span class="login-state saved" id="baselineState"></span><button class="ghost small" type="button" id="baselineClear">기준 해제</button></div>
+        <label class="login-use"><input type="checkbox" id="baselineRun"> <b>승인된 기준으로 테스트</b> <span class="hint">· 분석 없이 승인된 기준의 테스트를 그대로 실행합니다 (기대 결과 = 사람이 승인한 동작). 새로 분석하면 기준과 달라진 점을 보여줍니다.</span></label>
+      </div>
       <label class="login-use" style="margin-top:0"><input type="checkbox" id="clickAll"> <b>전체 동작 확인</b> <span class="hint">· 저장·등록·제출·출근·삭제 버튼까지 실제로 눌러 확인합니다. 실제 데이터가 바뀌므로 테스트 계정·테스트 서버에서만 켜주세요. 탈퇴·결제·송금·로그아웃은 항상 누르지 않습니다.</span></label>
     </div>
 
@@ -651,7 +658,26 @@
   }
 
   // URL 을 바꾸면 저장된 로그인 확인 → 없으면 로그인 화면인지 잠깐 열어서 확인
+  // 승인된 기준: 입력한 URL · 범위에 기준이 있으면 표시
+  async function refreshBaseline() {
+    const url = validUrl();
+    const scope = document.querySelector('input[name=scope]:checked').value;
+    const info = url ? await fetch(`/api/baseline?url=${encodeURIComponent(url)}&scope=${scope}`).then((r) => r.json()).catch(() => null) : null;
+    $('baselineField').hidden = !(info && info.exists);
+    if (info && info.exists) {
+      $('baselineState').textContent = `승인된 기준 있음 · ${new Date(info.approvedAt).toLocaleString('ko-KR')} 승인${info.approvedBy ? ` (${info.approvedBy})` : ''} · 페이지 ${info.pages}개${info.appVersion ? ` · v${info.appVersion}` : ''}`;
+    }
+  }
+  $('baselineClear').addEventListener('click', async () => {
+    if (!confirm('승인된 기준을 해제할까요? 이후 변경 감지는 직전 실행과 비교합니다.')) return;
+    await fetch('/api/baseline/clear', { method: 'POST', body: JSON.stringify({ url: validUrl(), scope: document.querySelector('input[name=scope]:checked').value }) });
+    refreshBaseline();
+  });
+  document.querySelectorAll('input[name=scope]').forEach((r) => r.addEventListener('change', refreshBaseline));
+
   function onUrlChange() {
+    clearTimeout(window.__baselineTimer);
+    window.__baselineTimer = setTimeout(refreshBaseline, 500);
     clearTimeout(checkTimer);
     const url = validUrl();
     $('loginNotice').classList.remove('show');
@@ -721,7 +747,8 @@
         } catch {}
       }
     }
-    const res = await fetch('/api/run', { method: 'POST', body: JSON.stringify({ url, scope, mode, browsers, file, useLogin, clickAll }) });
+    const baselineRun = !$('baselineField').hidden && $('baselineRun').checked;
+    const res = await fetch('/api/run', { method: 'POST', body: JSON.stringify({ url, scope, mode, browsers, file, useLogin, clickAll, baselineRun }) });
     if (!res.ok) return showError((await res.json()).error || '실행할 수 없습니다.');
   }
   $('runBasic').addEventListener('click', () => start('basic'));
@@ -869,9 +896,60 @@
       .join('');
     return `
       <section class="card">
-        <div class="section-title"><h2>이전 실행 대비 변경</h2><span class="meta">${esc(ch.prevId)} 실행과 비교 · ${total ? `${total}건` : '변경 없음'}</span></div>
+        <div class="section-title"><h2>${ch.against === 'baseline' ? '승인된 기준 대비 변경' : '직전 실행 대비 변경'}</h2><span class="meta">${esc(ch.prevId)}와 비교 · ${total ? `${total}건` : '변경 없음'}</span></div>
+        ${ch.against === 'baseline' ? '' : '<p class="hint" style="margin:0 0 6px">승인된 기준이 없어 직전 실행과 비교했습니다. 직전 실행에 이미 있던 문제는 변경으로 나타나지 않습니다. 결과를 검토한 뒤 "이 결과를 기준으로 승인"을 눌러 주세요.</p>'}
         <p class="hint" style="margin:0 0 10px">페이지 +${s.pagesAdded} / -${s.pagesRemoved} · 요소 +${s.elementsAdded} / -${s.elementsRemoved} · 동작 변경 ${s.actionsChanged} · 문구 +${s.textsAdded} / -${s.textsRemoved}</p>
         ${pages}
+      </section>`;
+  }
+
+  // 기준선 상태 · 승인 버튼
+  function baselineBar(r) {
+    const b = r.baseline;
+    const status = r.fromBaseline
+      ? `승인된 기준(${esc(new Date(r.fromBaseline.approvedAt).toLocaleString('ko-KR'))} · ${esc(r.fromBaseline.runId)})의 테스트로 실행한 결과입니다.`
+      : b && b.runId === r.id
+        ? `이 결과가 승인된 기준입니다 (${esc(new Date(b.approvedAt).toLocaleString('ko-KR'))}${b.approvedBy ? ` · ${esc(b.approvedBy)}` : ''}).`
+        : b
+          ? `승인된 기준: ${esc(new Date(b.approvedAt).toLocaleString('ko-KR'))} (${esc(b.runId)})`
+          : '이 URL · 범위에는 아직 승인된 기준이 없습니다.';
+    const btn = r.canApprove && !(b && b.runId === r.id)
+      ? `<button class="ghost small" type="button" id="approveBtn" onclick="approveBaseline(${esc(JSON.stringify(r.id))})">이 결과를 기준으로 승인</button>`
+      : '';
+    return `<div class="notice show baseline-bar">${status} ${btn}</div>`;
+  }
+
+  async function approveBaseline(id) {
+    if (!confirm('이 실행 결과를 승인된 기준으로 저장할까요?\n\n결과(실패 · 변경 · 커버리지)를 검토해서 지금 사이트 동작이 맞다고 확인한 경우에만 승인하세요. 이후 실행은 이 기준과 비교합니다.')) return;
+    const res = await fetch('/api/baseline/approve', { method: 'POST', body: JSON.stringify({ id }) });
+    const body = await res.json();
+    if (!res.ok) return alert(body.error || '승인하지 못했습니다.');
+    const s = await fetch('/api/state').then((x) => x.json());
+    renderResult(s.result);
+    refreshBaseline();
+  }
+
+  // 커버리지: 찾은 클릭 요소 중 동작까지 확인한 비율, 테스트하지 못한 요소
+  function renderCoverage(cov, pages) {
+    if (!cov) return '';
+    const low = (pages || []).filter((p) => p.warnings && p.warnings.length);
+    const rows = (pages || [])
+      .map((p) => `<tr><td>${esc(p.path)}</td><td>${p.found}</td><td>${p.action + p.errorOnly}</td><td>${p.displayOnly}</td><td>${p.unidentified}</td><td>${p.commonElsewhere + p.repeated}</td><td><b class="${p.rate < 70 ? 'cov-low' : ''}">${p.rate}%</b></td></tr>`)
+      .join('');
+    return `
+      <section class="card">
+        <div class="section-title"><h2>커버리지</h2><span class="meta">찾은 클릭 요소 ${cov.found}개 · 동작 확인률 ${cov.rate}%</span></div>
+        <div class="tiles">
+          <div class="tile pass"><div class="k">동작 확인</div><div class="v">${cov.action + cov.errorOnly}</div></div>
+          <div class="tile"><div class="k">노출·문구만</div><div class="v">${cov.displayOnly}</div></div>
+          <div class="tile ${cov.unidentified ? 'fail' : ''}"><div class="k">식별 불가 (미확인)</div><div class="v">${cov.unidentified}</div></div>
+          <div class="tile"><div class="k">다른 곳에서 확인</div><div class="v">${cov.commonElsewhere + cov.repeated}</div></div>
+        </div>
+        ${low.length ? `<div class="notice warn show" style="margin:0 0 10px">확인 범위가 부족한 페이지 ${low.length}개: ${low.map((p) => `${esc(p.path)} (${esc(p.warnings.join(', '))})`).join(' · ')}</div>` : ''}
+        <p class="hint" style="margin:0 0 8px">동작 확인 = 눌러서 결과까지 확인 · 노출·문구만 = 안전 모드/상한/클릭 불가로 누르지 않음 · 식별 불가 = 이름·속성이 없어 테스트를 만들지 못함 · 다른 곳에서 확인 = 공통 메뉴(시작 페이지) · 목록 반복(대표 1개)</p>
+        <details class="group"><summary><span class="t">페이지별 커버리지</span></summary>
+          <table class="tc"><tr><th>페이지</th><th>찾은 요소</th><th>동작 확인</th><th>노출만</th><th>식별 불가</th><th>다른 곳</th><th>확인률</th></tr>${rows}</table>
+        </details>
       </section>`;
   }
 
@@ -992,8 +1070,10 @@
         ${r.casesUrl ? `<a class="ghost small" href="${r.casesUrl}" target="_blank">케이스 보기 (HTML)</a>` : ''}
         <button class="ghost small" type="button" onclick="fetch('/api/open-folder',{method:'POST',body:JSON.stringify({id:${JSON.stringify(r.id)}})})">결과 폴더 열기</button>
       </div>
+      ${baselineBar(r)}
       ${errors}
       ${r.tests ? renderTests(r.tests, r.reportUrl) : ''}
+      ${renderCoverage(r.coverage, r.coveragePages)}
       ${renderChanges(r.changes)}
       ${renderDataActions(r.dataActions)}
       ${renderTypos(r.typos)}

@@ -41,8 +41,28 @@ const OUT = path.join(ROOT, 'docs', `${name}_동작흐름.pdf`);
   } catch {
     // git 이 없는 환경
   }
+  // 하네스 자가 검증 최신 결과 (selftest/reports/latest.json, npm run selftest 로 생성)
+  let selftestHtml = '<p class="small">아직 자가 검증을 실행하지 않았습니다 (<code>npm run selftest</code>).</p>';
+  try {
+    const st = JSON.parse(fs.readFileSync(path.join(ROOT, 'selftest', 'reports', 'latest.json'), 'utf-8'));
+    selftestHtml = `<p><b>v${esc(st.appVersion)}</b> · ${esc(st.ranAt.slice(0, 16).replace('T', ' '))} 실행 · 테스트 사이트 ${st.pages}페이지 · 케이스 ${st.cases}개 · 확인 항목 ${st.checks}개</p>
+<table><tr><th>지표</th><th>결과</th><th>기준</th></tr>
+<tr><td class="k">감지율</td><td><b>${st.detected} / ${st.defects} (${st.detectionRate}%)</b></td><td>심은 버그를 모두 실패로 잡아야 함 (100%)</td></tr>
+<tr><td class="k">오탐</td><td><b>${st.falsePositives}건</b></td><td>정상 사이트에서 실패가 없어야 함 (0건)</td></tr>
+<tr><td class="k">커버리지</td><td>${st.coverageRate ?? '-'}%</td><td>찾은 클릭 요소 중 동작까지 확인한 비율</td></tr></table>
+<table><tr><th>버그</th><th>영역</th><th>심은 버그</th><th>결과</th></tr>${st.results
+      .map((r) => `<tr><td class="k">${esc(r.id)}</td><td style="white-space:nowrap">${esc(r.area)}</td><td>${esc(r.desc)}${r.by ? `<div class="small">${esc(r.by)}</div>` : ''}</td><td>${r.detected ? '<span class="tag t-green">감지</span>' : '<span class="tag t-orange">놓침</span>'}</td></tr>`)
+      .join('')}</table>${
+      st.falsePositiveList && st.falsePositiveList.length
+        ? `<p class="small">오탐 목록: ${st.falsePositiveList.map((f) => esc(`${f.test} · ${f.check}`)).join(' / ')}</p>`
+        : ''
+    }`;
+  } catch {
+    // 아직 실행 전
+  }
   const html = fs
     .readFileSync(SRC, 'utf-8')
+    .replace('{{SELFTEST}}', selftestHtml)
     .replace(/\{\{VERSION\}\}/g, version)
     .replace('{{CHANGELOG}}', changelogTable)
     .replace('{{DEPLOYLOG}}', deployTable);

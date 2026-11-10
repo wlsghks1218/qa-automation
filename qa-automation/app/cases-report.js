@@ -361,7 +361,11 @@ function buildCasesHtml({ plan, result = {}, screensBase = 'screens' }) {
     .map((t) => `<li>"${esc(t.text)}" <span class="muted">- ${esc((t.reasons || []).join(' / '))}${t.pages ? ` · ${esc(t.pages.join(', '))}` : ''}</span></li>`)
     .join('')}</ul></section>` : ''}
 
-  ${result.changes ? `<section class="typos" style="background:var(--surface-2)"><h2>이전 실행 대비 변경 <small>${esc(result.changes.prevId)} 실행과 비교</small></h2><p class="muted" style="margin:0 0 6px">페이지 +${result.changes.summary.pagesAdded} / -${result.changes.summary.pagesRemoved} · 요소 +${result.changes.summary.elementsAdded} / -${result.changes.summary.elementsRemoved} · 동작 변경 ${result.changes.summary.actionsChanged} · 문구 +${result.changes.summary.textsAdded} / -${result.changes.summary.textsRemoved}</p><ul>${result.changes.pages
+  ${result.coverage ? `<section class="typos" style="background:var(--surface-2)"><h2>커버리지 <small>찾은 클릭 요소 ${result.coverage.found}개 · 동작 확인률 ${result.coverage.rate}%</small></h2><p class="muted" style="margin:0">동작 확인 ${result.coverage.action + result.coverage.errorOnly} · 노출·문구만 ${result.coverage.displayOnly} · 식별 불가(미확인) ${result.coverage.unidentified} · 다른 곳에서 확인 ${result.coverage.commonElsewhere + result.coverage.repeated}${(result.coverage.lowPages || []).length ? ` · 확인 범위 부족: ${result.coverage.lowPages.map((p) => esc(p.path)).join(', ')}` : ''}</p></section>` : ''}
+
+  ${result.fromBaseline ? `<section class="typos" style="background:var(--surface-2)"><h2>승인된 기준으로 실행 <small>${esc(new Date(result.fromBaseline.approvedAt).toLocaleString('ko-KR'))} 승인 · ${esc(result.fromBaseline.runId)}</small></h2></section>` : ''}
+
+  ${result.changes ? `<section class="typos" style="background:var(--surface-2)"><h2>${result.changes.against === 'baseline' ? '승인된 기준 대비 변경' : '직전 실행 대비 변경'} <small>${esc(result.changes.prevId)}와 비교</small></h2><p class="muted" style="margin:0 0 6px">페이지 +${result.changes.summary.pagesAdded} / -${result.changes.summary.pagesRemoved} · 요소 +${result.changes.summary.elementsAdded} / -${result.changes.summary.elementsRemoved} · 동작 변경 ${result.changes.summary.actionsChanged} · 문구 +${result.changes.summary.textsAdded} / -${result.changes.summary.textsRemoved}</p><ul>${result.changes.pages
     .flatMap((p) => p.items.slice(0, 15).map((i) => `<li>${esc(p.path)} · <b>${esc(i.type)}</b> <span class="muted">${esc(i.text)}</span></li>`))
     .join('')}</ul></section>` : ''}
 

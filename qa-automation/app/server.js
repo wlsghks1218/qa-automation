@@ -15,6 +15,7 @@ const { analyzeSiteWithAi } = require('./site-ai');
 const { buildCasesHtml } = require('./cases-report');
 const { encryptionAvailable, sealFile, openSealed, tempPath } = require('./secure-store');
 const { findPreviousRun, compareAnalysis } = require('./compare-runs');
+const { createBaselineStore } = require('./baseline');
 // 테스트 진행률(완료/전체)을 출력하는 리포터 → 앱 프로그레스 바
 const PROGRESS_REPORTER = path.join(__dirname, 'progress-reporter.js');
 const { writeDocSpecs } = require('../scripts/lib/doc-specs');
@@ -40,6 +41,8 @@ function loadSettings() {
 }
 
 const settings = loadSettings();
+// 승인된 기준선 저장소 (URL · 범위별)
+const baselines = createBaselineStore(path.join(USER_DIR, 'baselines'));
 const runDirs = new Map(); // 실행 ID → 결과 폴더 (폴더 설정을 바꿔도 이번 세션 결과 링크 유지)
 
 function saveSettings() {
@@ -442,7 +445,7 @@ function attachDocResults(doc, mappings, tests, group) {
   };
 }
 
-async function runJob({ url, scope, file, mode, browsers, useLogin, clickAll }) {
+async function runJob({ url, scope, file, mode, browsers, useLogin, clickAll, baselineRun }) {
   const id = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const runDir = path.join(settings.resultsDir, id);
   fs.mkdirSync(runDir, { recursive: true });
@@ -502,32 +505,62 @@ async function runJob({ url, scope, file, mode, browsers, useLogin, clickAll }) 
         result.clickAll = true;
         log('[동작 확인] 전체 동작 확인: 데이터가 바뀌는 버튼도 실제로 누릅니다 (탈퇴·결제·송금·로그아웃 제외).');
       }
-      const genCode = await runNode([GENERATOR, url, `--scope=${crawlScope}`], {
-        QA_OUTPUT_DIR: GENERATED_DIR,
-        // 화면 구조가 그대로인 페이지는 이전 분석을 재사용 (분석 시간 단축)
-        QA_CACHE_DIR: path.join(USER_DIR, 'cache'),
-        ...loginEnv,
-        ...(clickAll ? { QA_CLICK_ALL: '1' } : {}),
-      });
-      checkStop();
-      if (genCode !== 0) throw new Error('사이트 분석에 실패했습니다. 로그를 확인해주세요.');
+      // 승인된 기준으로 테스트: 분석 없이 기준의 테스트 코드를 그대로 실행 (기대 결과 = 사람이 승인한 동작)
+      const baseline = baselines.get(url, crawlScope);
+      const useBaseline = !!(baselineRun && baseline && !result.doc && mode !== 'ai');
+      if (baselineRun && !useBaseline) log('[기준] 승인된 기준이 없거나(기획서 · AI 테스트는 제외) 사용할 수 없어 새로 분석합니다.');
+      if (useBaseline) {
+        setPhase('승인된 기준으로 테스트 준비 중');
+        fs.rmSync(GENERATED_DIR, { recursive: true, force: true });
+        fs.mkdirSync(GENERATED_DIR, { recursive: true });
+        fs.cpSync(path.join(baseline.dir, 'specs'), GENERATED_DIR, { recursive: true });
+        for (const f of ['analysis.json', 'cases.json']) if (fs.existsSync(path.join(baseline.dir, f))) fs.copyFileSync(path.join(baseline.dir, f), path.join(GENERATED_DIR, f));
+        if (fs.existsSync(path.join(baseline.dir, 'screens'))) fs.cpSync(path.join(baseline.dir, 'screens'), path.join(GENERATED_DIR, 'screens'), { recursive: true });
+        result.fromBaseline = { runId: baseline.runId, approvedAt: baseline.approvedAt, approvedBy: baseline.approvedBy };
+        log(`[기준] ${new Date(baseline.approvedAt).toLocaleString('ko-KR')} 승인된 기준(${baseline.runId})의 테스트를 그대로 실행합니다. 분석은 생략합니다.`);
+      } else {
+        const genCode = await runNode([GENERATOR, url, `--scope=${crawlScope}`], {
+          QA_OUTPUT_DIR: GENERATED_DIR,
+          // 화면 구조가 그대로인 페이지는 이전 분석을 재사용 (분석 시간 단축)
+          QA_CACHE_DIR: path.join(USER_DIR, 'cache'),
+          ...loginEnv,
+          ...(clickAll ? { QA_CLICK_ALL: '1' } : {}),
+        });
+        checkStop();
+        if (genCode !== 0) throw new Error('사이트 분석에 실패했습니다. 로그를 확인해주세요.');
+        // 이 실행의 테스트 코드를 결과 폴더에 보관 → 나중에 "기준으로 승인"할 수 있게
+        fs.mkdirSync(path.join(runDir, 'specs'), { recursive: true });
+        for (const f of fs.readdirSync(GENERATED_DIR)) if (f.endsWith('.spec.ts')) fs.copyFileSync(path.join(GENERATED_DIR, f), path.join(runDir, 'specs', f));
+        result.canApprove = true;
+      }
 
       const analysisPath = path.join(GENERATED_DIR, 'analysis.json');
       const analysis = JSON.parse(fs.readFileSync(analysisPath, 'utf-8'));
       fs.copyFileSync(analysisPath, path.join(runDir, 'analysis.json'));
+      // 커버리지: 찾은 클릭 요소 중 동작까지 확인한 비율과 테스트하지 못한 요소
+      result.coverage = analysis.coverage || null;
+      result.coveragePages = analysis.pages.filter((p) => p.coverage).map((p) => ({ path: p.path, ...p.coverage }));
       // 규칙 기반 오타 의심 (LLM 없이). 테스트 실패가 아니라 경고로 따로 보여준다
       result.typos = analysis.typos || [];
       // 전체 동작 확인으로 실제로 눌린 데이터 변경 버튼 (정리 · 확인용)
       result.dataActions = analysis.pages.flatMap((p) => (p.dataActions || []).map((a) => ({ page: p.path, ...a })));
       result.cachedPages = analysis.pages.filter((p) => p.cached).map((p) => p.path);
 
-      // 이전 실행 대비 변경 감지 (같은 URL · 범위의 직전 분석과 비교)
-      const prevRun = findPreviousRun(settings.resultsDir, id, analysis.meta.startUrl, analysis.meta.scope);
-      if (prevRun) {
-        result.changes = { prevId: prevRun.id, ...compareAnalysis(prevRun.analysis, analysis) };
-        fs.writeFileSync(path.join(runDir, 'changes.json'), JSON.stringify(result.changes, null, 2), 'utf-8');
-        const s = result.changes.summary;
-        log(`[변경 감지] 이전 실행(${prevRun.id}) 대비: 페이지 +${s.pagesAdded}/-${s.pagesRemoved} · 요소 +${s.elementsAdded}/-${s.elementsRemoved} · 동작 변경 ${s.actionsChanged} · 문구 +${s.textsAdded}/-${s.textsRemoved}`);
+      // 변경 감지: 승인된 기준이 있으면 기준과, 없으면 같은 URL · 범위의 직전 실행과 비교
+      if (!useBaseline) {
+        let against = null;
+        if (baseline) {
+          against = { kind: 'baseline', label: `승인된 기준 (${new Date(baseline.approvedAt).toLocaleString('ko-KR')} · ${baseline.runId})`, analysis: JSON.parse(fs.readFileSync(path.join(baseline.dir, 'analysis.json'), 'utf-8')) };
+        } else {
+          const prevRun = findPreviousRun(settings.resultsDir, id, analysis.meta.startUrl, analysis.meta.scope);
+          if (prevRun) against = { kind: 'previous', label: `직전 실행 ${prevRun.id} (기준 미승인)`, analysis: prevRun.analysis };
+        }
+        if (against) {
+          result.changes = { prevId: against.label, against: against.kind, ...compareAnalysis(against.analysis, analysis) };
+          fs.writeFileSync(path.join(runDir, 'changes.json'), JSON.stringify(result.changes, null, 2), 'utf-8');
+          const s = result.changes.summary;
+          log(`[변경 감지] ${against.label} 대비: 페이지 +${s.pagesAdded}/-${s.pagesRemoved} · 요소 +${s.elementsAdded}/-${s.elementsRemoved} · 동작 변경 ${s.actionsChanged} · 문구 +${s.textsAdded}/-${s.textsRemoved}`);
+        }
       }
 
       // 케이스 목록(실행 전) → 결과 폴더의 cases.html. 테스트가 끝나면 같은 파일에 결과를 채운다
@@ -620,6 +653,11 @@ async function runJob({ url, scope, file, mode, browsers, useLogin, clickAll }) 
       } catch (e) {
         log(`[경고] cases.html 생성 실패: ${e.message}`);
       }
+    }
+    // 지금 이 URL · 범위의 승인된 기준 (결과 화면의 '기준 승인' 상태 표시용)
+    if (url) {
+      const b = baselines.get(url, result.doc ? 'all' : scope);
+      result.baseline = b ? { runId: b.runId, approvedAt: b.approvedAt, approvedBy: b.approvedBy, appVersion: b.appVersion } : null;
     }
     fs.writeFileSync(path.join(runDir, 'summary.json'), JSON.stringify(result, null, 2), 'utf-8');
     state.running = false;
@@ -766,6 +804,31 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { hasApiKey: !!currentLlm().apiKey, llm: llmSettingsView() });
     }
 
+    // 승인된 기준선: 조회 · 승인 · 해제
+    if (pathname === '/api/baseline' && req.method === 'GET') {
+      const q = new URL(req.url, 'http://x').searchParams;
+      const b = q.get('url') ? baselines.get(q.get('url'), q.get('scope') === 'single' ? 'single' : 'all') : null;
+      return json(res, 200, b ? { exists: true, runId: b.runId, approvedAt: b.approvedAt, approvedBy: b.approvedBy, appVersion: b.appVersion, pages: b.pages } : { exists: false });
+    }
+    if (pathname === '/api/baseline/approve' && req.method === 'POST') {
+      const body = await readJson(req);
+      const dir = runDirs.get(body.id) || path.join(settings.resultsDir, String(body.id || '').replace(/[^\w-]/g, ''));
+      if (!fs.existsSync(path.join(dir, 'analysis.json'))) return json(res, 400, { error: '이 실행 결과에는 분석 결과가 없어 기준으로 승인할 수 없습니다.' });
+      try {
+        const info = baselines.approve(dir, body.id);
+        log(`[기준] ${info.startUrl} (${info.scope === 'all' ? '세부 사이트 모두' : '입력한 페이지만'}) 기준을 ${body.id} 결과로 승인했습니다.`);
+        if (state.result && state.result.id === body.id) state.result.baseline = { runId: info.runId, approvedAt: info.approvedAt, approvedBy: info.approvedBy, appVersion: info.appVersion };
+        return json(res, 200, { ok: true, runId: info.runId, approvedAt: info.approvedAt, approvedBy: info.approvedBy, previous: info.history.length });
+      } catch (e) {
+        return json(res, 400, { error: e.message });
+      }
+    }
+    if (pathname === '/api/baseline/clear' && req.method === 'POST') {
+      const body = await readJson(req);
+      baselines.clear(body.url, body.scope === 'single' ? 'single' : 'all');
+      return json(res, 200, { exists: false });
+    }
+
     if (pathname.startsWith('/api/login')) {
       const body = req.method === 'POST' ? await readJson(req) : {};
       const target = body.url || new URL(req.url, 'http://x').searchParams.get('url') || (loginSession && loginSession.url);
@@ -829,7 +892,7 @@ const server = http.createServer(async (req, res) => {
         }
       }
       if (loginSession) return json(res, 409, { error: '로그인 창이 열려 있습니다. 로그인을 끝내고 "로그인 완료"를 누르거나 취소해주세요.' });
-      runJob({ url, scope, mode, browsers, file: body.file || null, useLogin: body.useLogin !== false, clickAll: body.clickAll === true });
+      runJob({ url, scope, mode, browsers, file: body.file || null, useLogin: body.useLogin !== false, clickAll: body.clickAll === true, baselineRun: body.baselineRun === true });
       return json(res, 202, { ok: true });
     }
 

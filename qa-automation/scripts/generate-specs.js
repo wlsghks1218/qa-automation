@@ -616,8 +616,8 @@ const tableRowsOf = (loc) =>
     })
     .catch(() => null);
 
-/** 문구가 화면의 한 요소로 실제로 찾아지는지 (표 한 줄을 이어 붙인 텍스트 같은 가짜 문구 제외) */
-const isVisibleText = async (page, t) => (await page.getByText(t).filter({ visible: true }).count().catch(() => 0)) > 0;
+// 문구가 화면에서 정확히 그 문구인 요소로 찾아지는지 (여러 메뉴 · 표 한 줄을 이어 붙인 가짜 문구 제외)
+const isVisibleText = async (page, t) => (await page.getByText(t, { exact: true }).filter({ visible: true }).count().catch(() => 0)) > 0;
 
 /**
  * 화면의 대표 목록(표·리스트 중 항목이 가장 많은 것)의 항목 문구. 검색·필터 결과 확인용.
@@ -1226,17 +1226,27 @@ async function analyzePage(newContext, pagePath, { commonSignatures, collectComm
     // 인터랙티브 요소 수집 및 로케이터 확정 (프로브 전에 모두 확정해야 reload 후에도 재사용 가능)
     const candidates = await collectCandidates(page);
     const resolved = [];
+    // 커버리지 집계: 찾은 클릭 요소가 어떻게 처리됐는지 (동작 확인 · 노출만 · 제외 사유별)
+    const cov = { found: candidates.length, unidentified: 0, popup: 0, commonElsewhere: 0, repeated: 0 };
+    result.coverage = cov;
     for (const cand of candidates) {
       const spec = await resolveLocator(page, cand);
       if (!spec) {
+        cov.unidentified++;
         result.skipped.push({ reason: '식별 불가 (접근성 이름·고유 속성 없음)', tag: cand.tag, href: cand.href });
         continue;
       }
-      if (isPopupControl(spec.name)) continue;
+      if (isPopupControl(spec.name)) {
+        cov.popup++;
+        continue;
+      }
       const signature = `${spec.role}|${spec.name}|${cand.href || ''}`;
       const isCommon = cand.zone === 'common';
-      if (isCommon && !collectCommon) continue;
-      if (!isCommon && commonSignatures.has(signature)) continue;
+      // 헤더 · 메뉴 · 푸터 공통 요소는 시작 페이지(또는 서브도메인 첫 페이지)에서 확인
+      if ((isCommon && !collectCommon) || (!isCommon && commonSignatures.has(signature))) {
+        cov.commonElsewhere++;
+        continue;
+      }
       // 부작용 위험 요소(삭제/결제/제출 등)도 노출·문구는 확인하고 클릭만 하지 않는다
       const risky = RISKY.test(spec.name) || (cand.type === 'submit' && !CLICK_ALL);
       resolved.push({ cand, spec, signature, risky, bucket: isCommon ? 'common' : 'features' });
@@ -1276,6 +1286,7 @@ async function analyzePage(newContext, pagePath, { commonSignatures, collectComm
       result.skipped.push({ reason: `목록 반복 항목: 같은 유형 ${g.length}개 중 대표 1개만 확인`, name: g[0].spec.name || g[0].cand.href });
     }
     for (let i = resolved.length - 1; i >= 0; i--) if (dropped.has(resolved[i])) resolved.splice(i, 1);
+    cov.repeated = dropped.size;
     if (dropped.size) step(`목록 반복 항목 ${dropped.size + [...repeatGroups.values()].filter((g) => g.length >= 3).length}개 → 같은 유형끼리 묶어 대표 ${[...repeatGroups.values()].filter((g) => g.length >= 3).length}개만 확인`);
 
     // 페이지당 탐지 개수 제한이 있으므로 상호작용 컴포넌트(버튼/토글/탭)를 링크보다 먼저 탐지한다
@@ -2092,6 +2103,20 @@ function slugOf(pagePath) {
   // 분석 결과 원본 저장 (기획서 매핑 · AI 분석 · 결과 화면에서 사용)
   const strip = (list) => list.map(({ signature, ...f }) => f);
   fs.mkdirSync(path.join(OUTPUT_DIR, 'screens'), { recursive: true });
+  // 커버리지: 찾은 클릭 요소 중 동작까지 확인한 비율. 다른 페이지에서 확인한 공통 요소 · 대표로 묶인 반복 항목은 분모에서 뺀다
+  const coverageOf = (r, i) => {
+    const c = r.coverage || { found: 0, unidentified: 0, popup: 0, commonElsewhere: 0, repeated: 0 };
+    const feats = i === 0 ? [...r.common, ...r.features] : r.features;
+    const action = feats.filter((f) => !['display', 'none'].includes(f.type)).length;
+    const errorOnly = feats.filter((f) => f.type === 'none').length;
+    const displayOnly = feats.filter((f) => f.type === 'display').length;
+    const denom = action + errorOnly + displayOnly + c.unidentified;
+    const rate = denom ? Math.round(((action + errorOnly) / denom) * 100) : 100;
+    const warnings = [];
+    if (c.unidentified) warnings.push(`식별할 수 없어 테스트하지 못한 요소 ${c.unidentified}개`);
+    if (denom && rate < 70) warnings.push(`동작 확인률 ${rate}% (70% 미만)`);
+    return { ...c, action, errorOnly, displayOnly, rate, warnings };
+  };
   const pages = all.map(({ path: p, url, title, status, blocked, keyTexts, texts, images, rolling, tables, iframes, dataActions, pageType, features, skipped, errors, shot, cached }, i) => {
     const screenshot = shot ? `screens/${pid(i + 1)}.jpg` : null;
     if (shot) fs.writeFileSync(path.join(OUTPUT_DIR, screenshot), shot);
@@ -2114,6 +2139,7 @@ function slugOf(pagePath) {
       errors,
       iframes: iframes || [],
       dataActions: dataActions || [],
+      coverage: blocked ? null : coverageOf(all[i], i),
       ...(cached ? { cached: true } : {}),
     };
   });
@@ -2124,10 +2150,27 @@ function slugOf(pagePath) {
     );
     typoList.push({ text, reasons, pages: where.map((r) => r.path) });
   }
+  // 사이트 전체 커버리지 합계
+  const covPages = pages.filter((p) => p.coverage);
+  const sum = (k) => covPages.reduce((n, p) => n + (p.coverage[k] || 0), 0);
+  const covDenom = sum('action') + sum('errorOnly') + sum('displayOnly') + sum('unidentified');
+  const coverage = {
+    found: sum('found'),
+    action: sum('action'),
+    errorOnly: sum('errorOnly'),
+    displayOnly: sum('displayOnly'),
+    unidentified: sum('unidentified'),
+    commonElsewhere: sum('commonElsewhere'),
+    repeated: sum('repeated'),
+    rate: covDenom ? Math.round(((sum('action') + sum('errorOnly')) / covDenom) * 100) : 100,
+    lowPages: covPages.filter((p) => p.coverage.warnings.length).map((p) => ({ path: p.path, warnings: p.coverage.warnings })),
+  };
+  console.log(`  -> 커버리지: 클릭 요소 ${coverage.found}개 중 동작 확인 ${coverage.action + coverage.errorOnly}개 · 노출만 ${coverage.displayOnly}개 · 식별 불가 ${coverage.unidentified}개 → 동작 확인률 ${coverage.rate}%`);
   const analysis = {
-    meta: { baseUrl: BASE_URL, startUrl: START_URL, scope: SCOPE, ...ENV, generatedAt: new Date().toISOString() },
+    meta: { baseUrl: BASE_URL, startUrl: START_URL, scope: SCOPE, ...ENV, generatedAt: new Date().toISOString(), appVersion: APP_VERSION },
     common: { id: pid(0), url: home.url, features: strip(commonFeatures) },
     pages,
+    coverage,
     typos: typoList,
   };
   fs.writeFileSync(path.join(OUTPUT_DIR, 'analysis.json'), JSON.stringify(analysis, null, 2), 'utf-8');
