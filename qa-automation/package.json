@@ -10,6 +10,7 @@
     "app": "electron .",
     "app:browser": "node app/server.js",
     "version:bump": "node scripts/bump-version.js",
+    "doc": "node scripts/build-doc.js",
     "build:win": "node scripts/build-app.js win",
     "build:mac": "node scripts/build-app.js mac",
     "build": "node scripts/build-app.js"

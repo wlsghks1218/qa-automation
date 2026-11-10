@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>QA_Automation_KC 동작 흐름</title>
+<style>
+  @page { size: A4; margin: 16mm 15mm 18mm; }
+  * { box-sizing: border-box; }
+  :root {
+    --ink: #1c1f23; --muted: #5f6672; --line: #d9dde3; --soft: #f3f5f8;
+    --blue: #2f5bd3; --blue-weak: #e9eefc; --green: #2b8a3e; --green-weak: #e8f6ec;
+    --orange: #d9480f; --orange-weak: #fff1e8; --purple: #6741d9; --purple-weak: #f0ebff;
+  }
+  body { margin: 0; color: var(--ink); font: 10.2pt/1.55 "Malgun Gothic", "Apple SD Gothic Neo", "Segoe UI", sans-serif; }
+  h1 { font-size: 21pt; margin: 0 0 4px; letter-spacing: -0.3px; }
+  h2 { font-size: 14pt; margin: 22px 0 8px; padding-bottom: 5px; border-bottom: 2px solid var(--ink); letter-spacing: -0.2px; }
+  h3 { font-size: 11pt; margin: 14px 0 6px; }
+  p { margin: 4px 0 8px; }
+  .sub { color: var(--muted); margin-bottom: 14px; }
+  .tag { display: inline-block; font-size: 8.5pt; font-weight: 700; padding: 1px 7px; border-radius: 999px; margin-right: 4px; vertical-align: 1px; }
+  .t-blue { background: var(--blue-weak); color: var(--blue); }
+  .t-green { background: var(--green-weak); color: var(--green); }
+  .t-orange { background: var(--orange-weak); color: var(--orange); }
+  .t-purple { background: var(--purple-weak); color: var(--purple); }
+  .page-break { break-before: page; }
+  table { width: 100%; border-collapse: collapse; margin: 6px 0 10px; font-size: 9.4pt; }
+  th, td { border: 1px solid var(--line); padding: 5px 8px; text-align: left; vertical-align: top; }
+  th { background: var(--soft); font-weight: 700; white-space: nowrap; }
+  td.k { font-weight: 700; white-space: nowrap; width: 22%; }
+  code { font-family: Consolas, monospace; font-size: 8.8pt; background: var(--soft); padding: 0 4px; border-radius: 3px; }
+  ul { margin: 4px 0 8px; padding-left: 18px; }
+  li { margin: 2px 0; }
+  .note { background: var(--soft); border-left: 3px solid var(--muted); padding: 7px 10px; margin: 8px 0; font-size: 9.4pt; }
+  .warn { background: var(--orange-weak); border-left-color: var(--orange); }
+
+  /* 전체 흐름도 */
+  .flow { display: flex; flex-direction: column; gap: 0; margin: 10px 0 4px; }
+  .row { display: flex; align-items: stretch; gap: 10px; }
+  .step { flex: 1; border: 1.5px solid var(--ink); border-radius: 10px; padding: 8px 11px; background: #fff; }
+  .step .n { font-size: 8.5pt; font-weight: 700; color: var(--muted); }
+  .step .t { font-size: 11pt; font-weight: 700; margin: 1px 0 3px; }
+  .step .d { font-size: 8.9pt; color: var(--muted); line-height: 1.45; }
+  .step.in { border-color: var(--blue); background: var(--blue-weak); }
+  .step.core { border-color: var(--purple); background: var(--purple-weak); }
+  .step.run { border-color: var(--green); background: var(--green-weak); }
+  .step.out { border-color: var(--orange); background: var(--orange-weak); }
+  .side { flex: 0 0 34%; border: 1.5px dashed var(--muted); border-radius: 10px; padding: 8px 11px; font-size: 8.9pt; color: var(--muted); }
+  .side b { color: var(--ink); }
+  .arrow { text-align: center; color: var(--muted); font-size: 13pt; line-height: 1; margin: 3px 0; }
+  .arrow-row { display: flex; gap: 10px; }
+  .arrow-row .arrow { flex: 1; }
+  .arrow-row .spacer { flex: 0 0 34%; }
+
+  /* 단계 내부 미니 흐름 */
+  .mini { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 6px 0 10px; font-size: 9pt; }
+  .mini span.b { border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 3px 8px; }
+  .mini span.a { color: var(--muted); }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .card h4 { margin: 0 0 4px; font-size: 10pt; }
+  .card p, .card ul { font-size: 9.2pt; margin: 2px 0; }
+  .small { font-size: 8.8pt; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<h1>QA_Automation_KC 동작 흐름</h1>
+<div class="sub">URL 또는 기획서를 넣으면 테스트 케이스를 자동으로 만들고 실행해서 결과를 보여주는 프로그램 · v{{VERSION}} 기준</div>
+
+<h2>1. 한눈에 보기</h2>
+<div class="flow">
+  <div class="row">
+    <div class="step in"><div class="n">STEP 1</div><div class="t">입력</div><div class="d">URL · 기획서(PDF 등) · 테스트 범위 · 브라우저 · 로그인 · 동작 확인 범위</div></div>
+    <div class="side"><b>로그인이 필요한 사이트</b><br>로그인 창에서 사람이 직접 로그인(ID/PW · SNS · 인증) → 로그인 상태를 저장해 이후 모든 단계에 사용</div>
+  </div>
+  <div class="arrow-row"><div class="arrow">▼</div><div class="spacer"></div></div>
+  <div class="row">
+    <div class="step core"><div class="n">STEP 2 · 크롤러</div><div class="t">페이지 찾기</div><div class="d">시작 페이지 → 세부 페이지 → 그 세부 페이지 … (같은 사이트만, 최대 50페이지)</div></div>
+    <div class="side"><b>다른 사이트 링크</b>(광고 · 외부 링크)<br>페이지로 분석하지 않고, 누르면 그 사이트로 <b>이동하는지만</b> 확인</div>
+  </div>
+  <div class="arrow-row"><div class="arrow">▼</div><div class="spacer"></div></div>
+  <div class="row">
+    <div class="step core"><div class="n">STEP 3 · 하네스 generate-specs.js</div><div class="t">페이지마다 화면 분석</div><div class="d">버튼 · 링크 · 배너 · 입력창 · 검색창 · 드롭다운 · 표 · 문구 · 이미지 · 롤링 배너를 찾고, <b>실제로 눌러서</b> 무슨 일이 일어나는지 관찰</div></div>
+    <div class="side"><b>기획서를 넣은 경우</b><br>AI가 기획서로 TC를 쓰고, 그 TC를 STEP 3에서 찾은 화면 요소와 연결</div>
+  </div>
+  <div class="arrow-row"><div class="arrow">▼</div><div class="spacer"></div></div>
+  <div class="row">
+    <div class="step core"><div class="n">STEP 4</div><div class="t">테스트 케이스 생성</div><div class="d">화면 위→아래 순서로 요소마다 <b>노출 · 문구 · 동작</b> 확인 항목을 만들고, 규칙 기반 오타 의심 검사 · <code>cases.html</code>(실행 전) 저장</div></div>
+    <div class="side"><b>AI 테스트 버튼</b><br>페이지 화면 캡처 + 요소 목록을 AI에게 보내 기대 동작 TC와 화면 이슈(오타 · 레이아웃 등)를 추가</div>
+  </div>
+  <div class="arrow-row"><div class="arrow">▼</div><div class="spacer"></div></div>
+  <div class="row">
+    <div class="step run"><div class="n">STEP 5 · Playwright</div><div class="t">실행 = 실제 사이트와 비교</div><div class="d">Chrome · Safari(WebKit) · Firefox에서 새 브라우저로 사이트를 다시 열고, 분석 때 관찰한 결과대로 동작하는지 하나씩 확인 (진행률 표시 · 중지 가능)</div></div>
+    <div class="side"><b>비교 기준</b><br>① 분석 때 실제로 관찰한 동작<br>② 기획서에 적힌 기대 결과<br>③ AI가 판단한 기대 동작</div>
+  </div>
+  <div class="arrow-row"><div class="arrow">▼</div><div class="spacer"></div></div>
+  <div class="row">
+    <div class="step out"><div class="n">STEP 6</div><div class="t">결과</div><div class="d">앱 화면 결과 · <code>cases.html</code>(대분류 · 중분류 · 소분류 · 과정 · 기대결과 · 결과 · 이유) · Playwright 리포트(실패 스크린샷 · 영상) · <code>run.log</code></div></div>
+    <div class="side"><b>결과 폴더</b>에 실행마다 따로 저장<br>CSV(엑셀)로도 내려받기 가능</div>
+  </div>
+</div>
+
+<div class="note">핵심 원리: 이 프로그램은 <b>사람이 하듯 화면을 직접 눌러 보고</b>(분석), 그때 본 결과를 <b>테스트 코드로 고정</b>한 뒤(생성), <b>새 브라우저에서 다시 해 봐서 같은 결과가 나오는지</b> 확인합니다(실행). 기획서나 AI를 쓰면 "관찰한 결과" 대신 "기대해야 하는 결과"와 비교할 수 있습니다.</div>
+
+<h2 class="page-break">2. STEP 1 · 입력</h2>
+<table>
+  <tr><th>항목</th><th>내용</th></tr>
+  <tr><td class="k">URL</td><td>테스트할 사이트 주소. 기획서만 넣으면 TC 작성까지만 진행</td></tr>
+  <tr><td class="k">기획서 첨부</td><td>PDF · 이미지 · 문서. AI API Key(Gemini · Claude · ChatGPT 중 선택)가 필요</td></tr>
+  <tr><td class="k">테스트 범위</td><td><b>세부 사이트 모두</b>: 연결된 세부 페이지까지 / <b>입력한 페이지만</b>: 그 페이지 하나</td></tr>
+  <tr><td class="k">브라우저</td><td>Chrome · Safari(WebKit 엔진) · Firefox. 여러 개 고르면 브라우저마다 실행하고 결과 차이를 따로 표시</td></tr>
+  <tr><td class="k">로그인</td><td>URL을 넣으면 로그인 화면인지 자동 확인 → <b>로그인 창 열기</b>에서 직접 로그인 → <b>로그인 완료</b>. 사이트별로 이 PC에만 저장</td></tr>
+  <tr><td class="k">동작 확인 범위</td><td><b>안전(기본)</b>: 삭제 · 결제 · 제출 · 저장 · 출근처럼 데이터가 바뀌는 버튼은 누르지 않고 노출 · 문구만 확인<br><b>전체 동작 확인</b>: 그런 버튼도 실제로 누름 (테스트 계정 · 테스트 서버 전용). 탈퇴 · 결제 · 송금 · 로그아웃은 항상 누르지 않음</td></tr>
+  <tr><td class="k">실행 버튼</td><td><b>규칙 기반 테스트</b>(AI 없이) / <b>AI 테스트</b>(규칙 기반 + AI 화면 분석)</td></tr>
+</table>
+
+<h2>3. STEP 2 · 페이지 찾기 (크롤러)</h2>
+<div class="mini"><span class="b">시작 페이지</span><span class="a">→</span><span class="b">링크 수집</span><span class="a">→</span><span class="b">1단계 세부 페이지</span><span class="a">→</span><span class="b">2단계 …</span><span class="a">→</span><span class="b">새 페이지 없음 / 50개 도달</span></div>
+<table>
+  <tr><th>규칙</th><th>설명</th></tr>
+  <tr><td class="k">같은 사이트</td><td>서브도메인 포함 (www.naver.com · news.naver.com 은 같은 사이트). 단, lovable.app · vercel.app 같은 호스팅 도메인은 서브도메인마다 다른 사이트</td></tr>
+  <tr><td class="k">다른 사이트</td><td>광고 배너 · 외부 링크는 분석하지 않고 "누르면 그 사이트로 이동하는지"만 테스트</td></tr>
+  <tr><td class="k">중복 제거</td><td><code>/notice/1</code>, <code>/notice/2</code>처럼 ID만 다른 상세 페이지는 하나만 · 광고 추적값(<code>utm_…</code>)만 다른 주소는 같은 페이지</td></tr>
+  <tr><td class="k">파일 링크</td><td>PDF · 이미지 · 압축 파일은 페이지로 분석하지 않음</td></tr>
+  <tr><td class="k">접속 차단</td><td>봇 차단 · 보안 확인 화면이면 "접속 차단"으로 표시하고 접속 상태만 검사</td></tr>
+</table>
+
+<h2 class="page-break">4. STEP 3 · 페이지 분석 (하네스 generate-specs.js)</h2>
+<p>페이지마다 <b>새 브라우저</b>로 열고, 화면 구조(DOM · 위치 · 스타일)를 읽어 테스트할 대상을 찾은 뒤, 요소를 <b>실제로 눌러서</b> 결과를 관찰합니다. 특정 사이트에 맞춘 규칙 없이 화면 구조만으로 판단합니다.</p>
+
+<h3>3-1. 무엇을 찾는가</h3>
+<table>
+  <tr><th>대상</th><th>찾는 방법</th><th>만들어지는 확인 항목</th></tr>
+  <tr><td class="k">버튼 · 링크 · 탭</td><td>클릭 가능한 모든 요소</td><td>노출 · 문구 · 동작</td></tr>
+  <tr><td class="k">배너 · 로고</td><td>넓은 영역에 여러 줄 문구/이미지를 담은 클릭 요소 · 헤더 왼쪽 위 이미지</td><td>노출 · 문구(줄마다) · 이미지 로드 · 동작</td></tr>
+  <tr><td class="k">일반 문구 · 이미지</td><td>클릭 요소 밖의 텍스트 덩어리 · 대체텍스트가 있는 이미지</td><td>노출 (숫자는 형식만)</td></tr>
+  <tr><td class="k">롤링 배너</td><td>몇 초간 9번 관찰해 보였다 사라지는 문구를 같은 영역끼리 묶음 (좌우 · 상하 · 페이드)</td><td>문구가 차례로 화면에 나타남</td></tr>
+  <tr><td class="k">툴팁</td><td>마우스를 올렸을 때 요소 근처에 새로 나타나는 문구</td><td>마우스 오버 노출</td></tr>
+  <tr><td class="k">입력창 · 검색창</td><td>입력 요소 · 이름에 "검색/조회/필터"가 있으면 검색창</td><td>입력 · 목록의 실제 값으로 검색 → 그 값만 표시 · 없는 값 → 결과 없음</td></tr>
+  <tr><td class="k">드롭다운</td><td>선택 박스(select) · 누르면 옵션(option/menuitem)이 나타나는 버튼</td><td>옵션을 하나씩 선택(최대 8개) → 선택 값 표시 / 목록 변경 / 페이지 이동</td></tr>
+  <tr><td class="k">표</td><td>머리글이 있는 표</td><td>열 구성 · 모든 행의 칸 수 · 열별 형식(날짜 · 시간 · 숫자) · 정렬 버튼</td></tr>
+  <tr><td class="k">반복 목록</td><td>같은 목록 안 같은 위치 · 같은 종류 요소 3개 이상 (표의 행 버튼 · 달력 날짜 · 상세 링크)</td><td>대표 1개만 테스트 ("목록 N개 중 대표")</td></tr>
+</table>
+
+<h3>3-2. 눌러서 관찰하는 결과 (동작 유형)</h3>
+<table>
+  <tr><th>관찰 결과</th><th>판단 기준</th><th>테스트에서 확인하는 것</th></tr>
+  <tr><td class="k">페이지 이동</td><td>주소가 바뀜</td><td>같은 주소로 이동 (외부 사이트는 도메인만)</td></tr>
+  <tr><td class="k">새 탭 열기</td><td>팝업 창이 열림</td><td>새 탭이 열리고 해당 사이트로 감</td></tr>
+  <tr><td class="k">모달 · 시트</td><td>화면 위에 고정된 새 층이 나타남</td><td>열림 → 닫기 버튼/ESC로 닫힘 (문구 개수가 늘었다 원래대로)</td></tr>
+  <tr><td class="k">펼침 · 접힘</td><td><code>aria-expanded</code> 변화</td><td>펼쳐졌다가 다시 누르면 접힘</td></tr>
+  <tr><td class="k">탭 전환</td><td><code>aria-selected</code> 변화</td><td>해당 탭이 선택됨</td></tr>
+  <tr><td class="k">표 정렬</td><td>표 머리글 버튼 클릭 후 행 순서 변화</td><td>행 순서가 바뀜</td></tr>
+  <tr><td class="k">콘텐츠 노출</td><td>화면에서 찾을 수 있는 새 문구가 나타남 (숫자만 바뀐 줄은 제외)</td><td>그 문구가 나타남</td></tr>
+  <tr><td class="k">깨진 링크</td><td>브라우저 오류 페이지로 감</td><td>정상 페이지로 열리는지 (현재 상태면 실패로 보고)</td></tr>
+  <tr><td class="k">클릭 안정성</td><td>눈에 보이는 변화 없음</td><td>눌러도 JS 오류가 없음</td></tr>
+</table>
+
+<h3>3-3. 오판을 막는 장치</h3>
+<div class="grid2">
+  <div class="card"><h4>상태 격리</h4><p>페이지마다 새 브라우저로 분석하고, 클릭할 때마다 쿠키 · 저장소를 처음 상태로 되돌림. 예) 다른 페이지에서 접은 사이드바가 다음 분석에 섞이지 않음</p></div>
+  <div class="card"><h4>바뀌는 값 처리</h4><p>숫자가 든 문구(건수 · 날짜 · 시간)는 형식만 비교 · 알림 배지 숫자는 무시 · 시계/카운트다운 · 롤링 문구는 클릭 결과로 보지 않음</p></div>
+  <div class="card"><h4>안전 모드</h4><p>삭제 · 결제 · 제출 · 저장 · 출근 · 로그아웃 등은 누르지 않고 노출 · 문구만 확인. 팝업은 "확인" 대신 닫기 · 취소 · ESC로 닫음</p></div>
+  <div class="card"><h4>찾기 쉬운 로케이터</h4><p>Playwright 권장 순서: 역할+이름 → 라벨 → placeholder → 링크 주소 → 고유 속성 → 태그+문구. 이름 끝 숫자 배지는 "있어도 없어도" 찾음</p></div>
+</div>
+
+<h2 class="page-break">5. STEP 4 · 테스트 케이스 생성</h2>
+<div class="mini"><span class="b">분석 결과 (analysis.json)</span><span class="a">→</span><span class="b">화면 위→아래 정렬</span><span class="a">→</span><span class="b">요소마다 확인 항목</span><span class="a">→</span><span class="b">Playwright 코드 (*.spec.ts)</span><span class="a">+</span><span class="b">cases.html (실행 전)</span></div>
+<p>한 요소 = 한 케이스, 케이스 안에서 확인 항목을 <b>각각 따로</b> 판정합니다. 예) <i>배너 "USDT 결제, QR 하나면 끝!"</i></p>
+<table>
+  <tr><th>확인 항목</th><th>내용</th></tr>
+  <tr><td class="k">노출</td><td>화면에 보이는가 (실패하면 나머지 항목은 "확인 불가"로 건너뜀)</td></tr>
+  <tr><td class="k">문구</td><td>요소 안 문구를 줄마다 확인 (숫자는 형식만)</td></tr>
+  <tr><td class="k">이미지 로드</td><td>요소 안 이미지가 깨지지 않았는가</td></tr>
+  <tr><td class="k">마우스 오버</td><td>툴팁 문구가 나타나는가</td></tr>
+  <tr><td class="k">동작</td><td>3-2의 관찰 결과대로 동작하는가</td></tr>
+  <tr><td class="k">오타 의심</td><td>실패가 아닌 <b>경고</b>. 사이트 전체 문구 비교(자주 쓰인 단어와 헷갈리는 자모 하나 차이) · 형식 오류(단어 반복 · 괄호 짝 · 낱자모) · 자주 틀리는 표기(되요 · 몇일 · 할께 …)</td></tr>
+</table>
+<p class="small">분석이 끝나면 결과 폴더에 <code>cases.json</code>과 <code>cases.html</code>(모든 항목 "미실행")이 먼저 저장됩니다.</p>
+
+<h2>6. STEP 5 · 실행 (사이트와 비교)</h2>
+<div class="mini"><span class="b">새 브라우저</span><span class="a">→</span><span class="b">(저장된 로그인 적용)</span><span class="a">→</span><span class="b">페이지 열기 · 팝업 처리</span><span class="a">→</span><span class="b">확인 항목 순서대로 실행</span><span class="a">→</span><span class="b">항목별 통과/실패 기록</span></div>
+<table>
+  <tr><th>설정</th><th>값</th><th>이유</th></tr>
+  <tr><td class="k">동시 실행</td><td>4개</td><td>사이트에 요청이 몰리면 무더기 타임아웃 · PC 메모리 보호</td></tr>
+  <tr><td class="k">재시도</td><td>1회</td><td>일시적 네트워크 지연. 재시도로 통과하면 "불안정"으로 표시</td></tr>
+  <tr><td class="k">화면 · 언어</td><td>분석 때와 동일</td><td>1440×900, 분석한 PC의 언어 · 시간대로 고정해 문구가 달라지지 않게</td></tr>
+  <tr><td class="k">진행률</td><td>앱 화면 프로그레스 바</td><td>분석: 페이지 수 · 실행: 끝난 케이스 / 전체 (통과 초록 · 실패 빨강)</td></tr>
+  <tr><td class="k">중지</td><td>중지 버튼</td><td>실행 중인 분석 · 테스트와 브라우저를 즉시 종료</td></tr>
+</table>
+<div class="note"><b>"사이트와 비교"의 의미</b> — 규칙 기반 테스트의 기대 결과는 <b>분석 때 실제로 관찰한 동작</b>입니다. 그래서 "지금 사이트가 분석 시점과 같은 화면 · 같은 동작인가"를 확인하는 회귀 테스트에 강합니다. "원래 이렇게 동작해야 한다"를 확인하려면 기획서(기획서의 기대 결과와 비교)나 AI 테스트를 함께 씁니다.</div>
+
+<h2 class="page-break">7. STEP 6 · 결과</h2>
+<p>실행마다 결과 폴더(기본: 문서/QA_Automation_KC, 앱에서 변경 가능) 아래 <code>날짜-시간</code> 폴더가 만들어집니다.</p>
+<table>
+  <tr><th>파일</th><th>내용</th></tr>
+  <tr><td class="k">cases.html</td><td>TC 표: 대분류(페이지) · 중분류(요소) · 소분류(확인 항목) · 과정 · 기대결과 · 결과 · 이유. 검색 · 필터 · CSV(엑셀) 다운로드 · 화면 캡처 링크</td></tr>
+  <tr><td class="k">report/</td><td>Playwright HTML 리포트. 실패한 케이스의 스크린샷 · 영상 · 트레이스</td></tr>
+  <tr><td class="k">summary.json · results.json</td><td>결과 요약 / 원본 실행 결과</td></tr>
+  <tr><td class="k">analysis.json · cases.json</td><td>분석 결과(페이지 · 요소 · 문구 · 오타 의심) / 케이스 목록</td></tr>
+  <tr><td class="k">run.log</td><td>실행 전체 로그 (분석 실패 원인 확인용)</td></tr>
+  <tr><td class="k">doc-testcases.* · ai-testcases.*</td><td>기획서 · AI 테스트를 사용한 경우의 TC와 결과</td></tr>
+</table>
+
+<h3>결과 읽는 법</h3>
+<table>
+  <tr><th>결과</th><th>의미</th></tr>
+  <tr><td class="k"><span class="tag t-green">통과</span></td><td>분석 때와 같게 동작</td></tr>
+  <tr><td class="k"><span class="tag t-orange">실패</span></td><td>다르게 동작. 이유 열에 어느 항목이 왜 실패했는지 표시. 실제 버그 · 사이트 변경 · 데이터 변화 중 무엇인지 사람이 판단</td></tr>
+  <tr><td class="k"><span class="tag t-orange">경고</span></td><td>오타 의심 (확정 아님)</td></tr>
+  <tr><td class="k"><span class="tag t-blue">건너뜀</span></td><td>안전 모드로 누르지 않음 · 노출 실패로 확인 불가 등 (이유 열 참고)</td></tr>
+  <tr><td class="k"><span class="tag t-blue">불안정</span></td><td>첫 시도는 실패, 재시도는 통과</td></tr>
+</table>
+
+<h2>8. 선택 기능</h2>
+<div class="grid2">
+  <div class="card"><h4><span class="tag t-purple">기획서</span> URL + 기획서</h4>
+    <ul><li>AI가 기획서를 읽고 TC 작성</li><li>TC마다 STEP 3에서 찾은 화면 요소와 연결</li><li>연결된 TC는 기획서의 기대 결과로 실행 · 못 찾은 TC는 "화면에서 못 찾음" · 판단 불가는 "수동 확인 필요"</li><li>기획서와 실제 동작이 다르면 "실제 동작 차이"로 표시</li></ul></div>
+  <div class="card"><h4><span class="tag t-purple">AI 테스트</span> URL만</h4>
+    <ul><li>페이지 화면 캡처 + 요소 목록을 AI에 전송</li><li>AI가 기대 동작 기준 TC를 작성해 함께 실행</li><li>이미지 속 글자 · 맞춤법 · 어색한 문구 · 레이아웃 이슈 보고</li></ul></div>
+  <div class="card"><h4><span class="tag t-blue">로그인</span> 로그인이 필요한 사이트</h4>
+    <ul><li>로그인 화면 자동 감지</li><li>사람이 직접 로그인 (어떤 방식이든)</li><li>저장된 로그인으로 분석 · 실행, 만료 시 다시 로그인 안내</li></ul></div>
+  <div class="card"><h4><span class="tag t-orange">전체 동작 확인</span> 테스트 계정 전용</h4>
+    <ul><li>저장 · 등록 · 제출 · 삭제 버튼도 실제로 눌러 확인</li><li>분석 · 브라우저별 실행 · 재시도마다 반복해서 눌릴 수 있음</li></ul></div>
+</div>
+
+<h2>9. 알아둘 한계</h2>
+<ul>
+  <li>이미지 안에 그려진 글자 · canvas 화면은 규칙 기반으로 읽지 못함 (AI 테스트로 보완)</li>
+  <li>숫자가 든 문구는 형식만 비교하므로 "10% → 7%" 같은 값 변경은 규칙 기반으로 잡지 못함 (기획서로 보완)</li>
+  <li>규칙 기반의 기대 결과는 "분석 시점의 동작"이라, 분석 시점에 이미 잘못된 동작은 정상으로 기록됨</li>
+  <li>마우스 오버로만 나타나는 하위 메뉴 · iframe 안 · Shadow DOM 안 요소는 아직 분석 대상이 아님</li>
+  <li>서버에 저장되는 설정(계정 설정 등)은 분석 후 되돌릴 수 없음 (전체 동작 확인을 켰을 때만 해당)</li>
+</ul>
+
+</body>
+</html>
