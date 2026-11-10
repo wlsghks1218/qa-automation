@@ -20,3 +20,5 @@ node_modules/
 
 # 프로젝트 루트에 놓인 개인 PDF 문서 (설명서 PDF 는 docs/ 에 있음)
 /*.pdf
+# 다른 도구가 만든 개인 설명 문서
+/docs/QA자동화_및_QA_Automation_KC_동작설명.pdf
