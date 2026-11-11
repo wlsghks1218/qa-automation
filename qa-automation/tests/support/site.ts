@@ -45,7 +45,35 @@ const shortUrl = (u: string) => (u.length > 120 ? `${u.slice(0, 117)}…` : u);
  *  errors: JS 런타임 오류 · network: 같은 사이트 요청 실패(404 · 5xx · 연결 실패)
  *  consoleErrors: console.error · mixed: https 페이지의 http 리소스
  */
+/** 로그인 상태 파일의 sessionStorage (Playwright 기본 storageState 에는 없음) */
+type SavedSession = { origin: string; items: { name: string; value: string }[] }[];
+let savedSession: SavedSession | null = null;
+function loadSavedSession(): SavedSession {
+  if (savedSession) return savedSession;
+  savedSession = [];
+  const file = process.env.QA_STORAGE_STATE;
+  try {
+    if (file) savedSession = JSON.parse(require('fs').readFileSync(file, 'utf-8')).sessionStorage || [];
+  } catch {
+    // 로그인 상태 파일을 읽을 수 없으면 sessionStorage 없이 진행
+  }
+  return savedSession!;
+}
+
 export async function openPage(page: Page, url: string) {
+  // sessionStorage 에 로그인을 두는 사이트(Web3Auth 등): 페이지 스크립트보다 먼저 같은 사이트에만 채운다 (generate-specs.js 의 restoreSessionStorage 와 동일)
+  const session = loadSavedSession();
+  if (session.length) {
+    await page.context().addInitScript((saved: SavedSession) => {
+      const s = saved.find((x) => x.origin === location.origin);
+      if (!s) return;
+      try {
+        for (const { name, value } of s.items) if (sessionStorage.getItem(name) === null) sessionStorage.setItem(name, value);
+      } catch {
+        // 저장소를 쓸 수 없는 페이지
+      }
+    }, session);
+  }
   const errors: string[] = [];
   const network: string[] = [];
   const consoleErrors: string[] = [];
@@ -67,12 +95,14 @@ export async function openPage(page: Page, url: string) {
   });
 
   // 테스트 도중 뒤늦게 뜨는 팝업 자동 처리
+  // 같은 문구의 버튼이 여러 개(상단 띠 배너 + 팝업)일 수 있으므로 보이는 첫 번째만 누른다.
+  // 눌러도 사라지지 않는 팝업이 테스트마다 끼어들어 모든 확인을 시간 초과로 만들지 않도록 3번까지만 개입한다
   await page.addLocatorHandler(
-    page.getByRole('button', { name: POPUP_DISMISS }),
+    page.getByRole('button', { name: POPUP_DISMISS }).filter({ visible: true }).first(),
     async (btn) => {
       await btn.click({ timeout: 2000 }).catch(() => {});
     },
-    { noWaitAfter: true }
+    { noWaitAfter: true, times: 3 }
   );
 
   const response = await page.goto(url, { waitUntil: 'domcontentloaded' });
@@ -157,6 +187,49 @@ export async function axeScan(page: Page) {
   return res.violations
     .map((v) => ({ id: v.id, impact: v.impact || 'minor', help: v.help, count: v.nodes.length, target: String(v.nodes[0]?.target?.[0] || '') }))
     .sort((a, b) => (rank[a.impact] ?? 9) - (rank[b.impact] ?? 9));
+}
+
+/**
+ * 화면 문구 이상: 치환되지 않은 변수({{token}} · ${amount} · {name}) · 번역 키 그대로 노출(uf_pay_home_title)
+ * · undefined / NaN / [object Object] / Invalid Date. 코드 예시(pre · code)와 입력창 값은 제외
+ */
+export async function textIssues(page: Page) {
+  return page.evaluate(() => {
+    const BAD = [
+      /\{\{\s*[\w.]+\s*\}\}/,
+      /\$\{[\w.]+\}/,
+      /(^|[^\w{])\{[a-zA-Z_][\w.]*\}(?!\})/,
+      /^[a-z][a-z0-9]*(?:_[a-z0-9]+){2,}$/,
+      /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+){2,}$/,
+      /(^|[\s(:])(undefined|NaN|\[object Object\]|Invalid Date)(?=$|[\s),.])/,
+    ];
+    const out: string[] = [];
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n && out.length < 5; n = walker.nextNode()) {
+      const t = (n.textContent || '').trim().replace(/\s+/g, ' ');
+      const el = n.parentElement;
+      if (!t || !el || el.closest('pre, code, script, style, noscript, textarea, template')) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0 || getComputedStyle(el).visibility === 'hidden') continue;
+      if (BAD.some((re) => re.test(t)) && !out.includes(t)) out.push(t.slice(0, 60));
+    }
+    return out;
+  });
+}
+
+// 오류 · 이용 불가 안내 화면 문구 (generate-specs.js 의 ERROR_SCREEN 과 동일하게 유지)
+const ERROR_SCREEN = /(이용\s*불가|사용할 수 없|지원(되|하)지 않|접근(이)?\s*(제한|거부|불가)|권한이 없|오류가 발생|일시적인 오류|서비스 점검|not\s+(available|supported)|unavailable|access\s+denied|forbidden|something went wrong|ご利用いただけません|エラーが発生|アクセスできません)/i;
+
+/** 지금 화면이 오류 · 이용 불가 안내 화면이면 그 제목, 아니면 null (클릭 요소가 거의 없고 제목이 안내 문구) */
+export async function errorScreenText(page: Page) {
+  return page.evaluate((src) => {
+    const re = new RegExp(src, 'i');
+    const visible = (el: Element) => el.getBoundingClientRect().width > 0;
+    const clickable = Array.from(document.querySelectorAll('a[href], button, [role="button"], input, select, textarea')).filter(visible).length;
+    if (clickable > 4) return null;
+    const heads = Array.from(document.querySelectorAll('h1, h2, h3, [role="heading"]')).filter(visible).map((h) => (h as HTMLElement).innerText.trim());
+    return heads.find((h) => re.test(h)) || null;
+  }, ERROR_SCREEN.source);
 }
 
 /** 레이지 로딩 요소까지 렌더링되도록 끝까지 스크롤 후 상단 복귀 */

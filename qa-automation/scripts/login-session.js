@@ -36,9 +36,17 @@ if (!url || !statePath) {
     if (!chunk.includes('save') || saving) return;
     saving = true;
     fs.mkdirSync(path.dirname(statePath), { recursive: true });
-    await context.storageState({ path: statePath });
-    const { cookies, origins } = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
-    console.log(`[로그인] 로그인 상태 저장 완료 (쿠키 ${cookies.length}개, 저장소 ${origins.length}개 사이트)`);
+    // 쿠키 · localStorage 에 더해 IndexedDB(Firebase 등) · sessionStorage(Web3Auth 등)에 로그인을 두는 사이트도 있어 함께 저장
+    await context.storageState({ path: statePath, indexedDB: true });
+    const state = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
+    state.sessionStorage = [];
+    for (const p of context.pages()) {
+      const s = await p.evaluate(() => ({ origin: location.origin, items: Object.entries(sessionStorage).map(([name, value]) => ({ name, value })) })).catch(() => null);
+      if (s && /^https?:/.test(s.origin) && s.items.length && !state.sessionStorage.some((x) => x.origin === s.origin)) state.sessionStorage.push(s);
+    }
+    fs.writeFileSync(statePath, JSON.stringify(state), 'utf-8');
+    const { cookies, origins } = state;
+    console.log(`[로그인] 로그인 상태 저장 완료 (쿠키 ${cookies.length}개, 저장소 ${origins.length}개 사이트, 세션 저장소 ${state.sessionStorage.length}개 사이트)`);
     await browser.close().catch(() => {});
     process.exit(0);
   });

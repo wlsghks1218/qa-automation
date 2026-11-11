@@ -22,6 +22,9 @@ module.exports = defineConfig({
   // 네트워크 일시 지연 대비 1회 재시도. 재시도로 통과한 테스트는 결과에 '불안정'으로 표시된다
   retries: 1,
   use: {
+    // 클릭 · 입력 하나가 멈추면(화면 밖 요소 등) 테스트 전체 제한 시간을 다 쓰지 않고 바로 실패로 기록
+    actionTimeout: 15 * 1000,
+    navigationTimeout: 30 * 1000,
     // 앱에서 저장한 로그인 상태가 있으면 모든 테스트를 로그인된 상태로 시작
     ...(process.env.QA_STORAGE_STATE && fs.existsSync(process.env.QA_STORAGE_STATE) ? { storageState: process.env.QA_STORAGE_STATE } : {}),
     // 저장된 로그인으로 실행할 때는 트레이스를 남기지 않는다 (트레이스에 쿠키 · 저장소 · 요청 헤더가 그대로 들어감)

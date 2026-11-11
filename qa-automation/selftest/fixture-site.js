@@ -21,7 +21,11 @@ const header = (page) => `<header>
 <style>.menu{position:relative;display:inline-block}.sub{display:none;position:absolute;top:26px;left:0;background:#fff;border:1px solid #999;padding:6px;white-space:nowrap}.menu:hover .sub{display:block}
 dialog{border:1px solid #333}</style>`;
 
-const shell = (title, page, body, extra = '') => `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>${title}</title>${extra}</head><body>${header(page)}<main>${body}</main></body></html>`;
+// 건너뛰기 링크: 평소엔 화면 밖, 키보드 포커스 때만 보인다
+const skip = (page) => `<a class="skip" href="#${page === 'home' ? M('nowhere', 'content') : 'content'}">본문 바로가기</a>
+<style>.skip{position:absolute;top:-40px;left:0;opacity:0}.skip:focus{top:0;opacity:1}</style>`;
+
+const shell = (title, page, body, extra = '') => `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>${title}</title>${extra}</head><body>${skip(page)}${header(page)}<main id="content">${body}</main></body></html>`;
 
 const people = Array.from({ length: 12 }, (_, i) => [`구성원${'가나다라마바사아자차카타'[i]}`, ['개발팀', '기획팀', '디자인팀'][i % 3], `2025-0${(i % 9) + 1}-1${i % 9}`]);
 
@@ -32,6 +36,11 @@ function home() {
     `<h1>자가 검증 홈</h1>
 <img alt="배너 이미지" width="200" height="40" src="${M('/missing.png', "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='40'%3E%3Crect width='200' height='40' fill='%2399c'/%3E%3C/svg%3E")}">
 <p>서비스를 소개하는 문구입니다</p>
+<p>결제가능 ${M('{{token}}', 'USDT')}</p>
+<button type="button" ${M('', 'disabled')}>다음 단계</button>
+<a href="/" class="lg" id="lgA">로고 링크</a><a href="/" class="lg" id="lgB" style="display:none">로고 링크</a>
+<div id="topBar">앱 설치 안내 <button type="button" onclick="topBar.remove()">오늘 하루 보지 않기</button></div>
+<div id="floatPop" style="position:fixed;right:10px;bottom:10px;background:#fff;border:1px solid #999;padding:8px">새 기능 안내 <button type="button" onclick="floatPop.remove()">오늘 하루 보지 않기</button></div>
 <button type="button" id="openModal">공지 보기</button>
 <dialog id="dlg"><p>점검 안내 공지</p><button type="button" id="closeModal">닫기</button></dialog>
 <button type="button" id="acc" aria-expanded="false" aria-controls="accBody">자주 묻는 질문 펼치기</button>
@@ -39,6 +48,8 @@ function home() {
 <a href="/support" target="${M('_self', '_blank')}">도움말 새 창</a>
 ${M('<div style="width:900px;background:#eee">넓은 홍보 영역</div>', '<div style="max-width:100%;background:#eee">홍보 영역</div>')}
 <script>
+// 같은 이름의 로고 링크 두 개가 번갈아 보임 · 같은 문구의 '보지 않기' 버튼이 두 개 (오탐 방지 확인용, 버그 아님)
+setInterval(() => { const a = lgA.style.display === 'none'; lgA.style.display = a ? '' : 'none'; lgB.style.display = a ? 'none' : ''; }, 1500);
 openModal.onclick = () => dlg.showModal();
 closeModal.onclick = () => { ${M('', 'dlg.close();')} };
 acc.onclick = () => { ${M('', "const o = acc.getAttribute('aria-expanded') === 'true'; acc.setAttribute('aria-expanded', String(!o)); accBody.hidden = o;")} };
@@ -112,7 +123,11 @@ http
     if (u === '/list') return send(200, list());
     if (u === '/about') return send(200, about());
     if (u === '/support') return send(200, form());
-    if (/^\/item\/\d+$/.test(u)) return send(200, shell('공지 상세', 'item', `<h1>공지 상세</h1><p>공지 내용입니다</p><a href="/list">목록으로</a>`));
+    if (/^\/item\/\d+$/.test(u)) {
+      // 이름 없는 뒤로가기 아이콘 버튼 (앱 화면에 흔한 형태)
+      const back = `<button type="button" class="btn-back" onclick="${M('', 'history.back()')}"><svg width="16" height="16" viewBox="0 0 16 16"><path d="M10 2L4 8l6 6" stroke="#333" fill="none"/></svg></button>`;
+      return send(200, shell('공지 상세', 'item', `${back}<h1>공지 상세</h1><p>공지 내용입니다</p><a href="/list">목록으로</a>`));
+    }
     if (u === '/api/stats') return send(500, '{"error":"down"}', 'application/json');
     if (u === '/api/stats-ok') return send(200, '{"ok":true}', 'application/json');
     return send(404, shell('페이지를 찾을 수 없습니다', '404', '<h1>페이지를 찾을 수 없습니다</h1><p>404</p>'));

@@ -79,6 +79,19 @@
   .card + .card { margin-top: 16px; }
   .label { font-size: 13px; font-weight: 600; margin: 0 0 8px; display: block; }
   .field + .field { margin-top: 18px; }
+  /* 입력 묶음: [필수] / [권장] / [선택] */
+  .form-group-title { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 700; margin: 26px 0 12px; padding-top: 18px; border-top: 1px solid var(--border); }
+  #form > .form-group-title:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+  .form-group-title .hint { font-weight: 400; }
+  .form-group-title .tag { font-size: 11.5px; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
+  .tag.must { background: rgba(224, 49, 49, .14); color: var(--fail); }
+  .tag.rec { background: rgba(59, 91, 219, .14); color: var(--accent); }
+  .tag.opt { background: rgba(134, 142, 150, .16); color: var(--muted); }
+  details.form-optional > summary { cursor: pointer; list-style: none; }
+  details.form-optional > summary::-webkit-details-marker { display: none; }
+  details.form-optional > summary::after { content: '펼치기 ▾'; margin-left: auto; font-size: 12.5px; font-weight: 400; color: var(--muted); }
+  details.form-optional[open] > summary::after { content: '접기 ▴'; }
+  details.form-optional + .notice, details.form-optional ~ .run-buttons { margin-top: 18px; }
 
   .url-input {
     width: 100%; padding: 11px 14px; border-radius: 10px; border: 1px solid var(--border);
@@ -316,11 +329,14 @@
   <p class="lead">사이트를 분석해 기능별 테스트 케이스를 자동으로 만들고, 바로 실행해서 결과를 보여드립니다.</p>
 
   <section class="card" id="form">
+    <div class="form-group-title"><span class="tag must">필수</span> 테스트 대상 <span class="hint">· URL 또는 기획서 중 하나는 꼭 필요합니다</span></div>
     <div class="field">
       <label class="label" for="url">URL</label>
       <input class="url-input" id="url" type="url" placeholder="https://example.com" autocomplete="off" spellcheck="false">
+      <p class="hint" id="projectState" hidden style="margin:6px 0 0"></p>
     </div>
 
+    <div class="form-group-title"><span class="tag rec">권장</span> 로그인 · 기획서 · 범위 · 브라우저</div>
     <div class="field" id="loginField">
       <span class="label">로그인 <span class="hint">· 로그인해야 보이는 화면까지 테스트할 때. ID/PW · SNS 로그인 · 인증 모두 직접 진행</span></span>
       <div class="login-row">
@@ -336,10 +352,10 @@
     </div>
 
     <div class="field">
-      <span class="label">기획서 첨부</span>
+      <span class="label">기획서 또는 내 TC 첨부 <span class="hint">· TC 파일(CSV)을 넣으면 내 TC 를 그대로 화면과 짝지어 실행하고 자동화 현황을 보여줍니다</span></span>
       <div class="drop" id="drop" tabindex="0">
         <strong>파일을 여기로 드래그하거나 클릭해서 선택</strong>
-        <small>PDF, PNG, JPG, WEBP, TXT, MD · 최대 40MB</small>
+        <small>PDF, PNG, JPG, WEBP, TXT, MD · TC 파일(CSV · TSV, TestRail 내보내기 등) · 최대 40MB</small>
       </div>
       <div class="file-chip" id="fileChip">
         <span>📄</span>
@@ -347,7 +363,7 @@
         <span class="size" id="fileSize"></span>
         <button type="button" id="fileRemove">삭제</button>
       </div>
-      <input type="file" id="fileInput" accept=".pdf,.png,.jpg,.jpeg,.webp,.txt,.md" hidden>
+      <input type="file" id="fileInput" accept=".pdf,.png,.jpg,.jpeg,.webp,.txt,.md,.csv,.tsv" hidden>
     </div>
 
     <div class="field">
@@ -374,6 +390,28 @@
     </div>
 
     <div class="field">
+      <label class="label" for="locale">화면 언어 <span class="hint">· 언어마다 다른 화면이 나오는 서비스(국가별 이용 제한 등)는 테스트할 언어를 골라주세요</span></label>
+      <select id="locale" class="url-input" style="max-width:260px">
+        <option value="">이 PC 언어 (기본)</option>
+        <option value="ko-KR">한국어 (ko-KR)</option>
+        <option value="en-US">영어 (en-US)</option>
+        <option value="ja-JP">일본어 (ja-JP)</option>
+        <option value="zh-TW">중국어 번체 (zh-TW)</option>
+        <option value="th-TH">태국어 (th-TH)</option>
+      </select>
+      <div class="browsers" style="margin-top:10px" id="xltLocales">
+        <span class="hint" style="align-self:center">다국어(XLT) 함께 확인:</span>
+        <label><input type="checkbox" name="xlt" value="en-US"><b>US</b><span>영어</span></label>
+        <label><input type="checkbox" name="xlt" value="ja-JP"><b>JP</b><span>일본어</span></label>
+        <label><input type="checkbox" name="xlt" value="zh-TW"><b>TW</b><span>중국어 번체</span></label>
+        <label><input type="checkbox" name="xlt" value="th-TH"><b>TH</b><span>태국어</span></label>
+      </div>
+      <p class="hint" style="margin:6px 0 0">선택한 언어마다 같은 화면을 열어 번역 누락 · 치환 안 된 변수({{token}}) · 번역 키 노출을 확인합니다.</p>
+    </div>
+
+    <details class="form-optional" id="optionalGroup">
+    <summary class="form-group-title"><span class="tag opt">선택</span> 동작 확인 범위 · 결과 저장 폴더</summary>
+    <div class="field">
       <span class="label">동작 확인 범위</span>
       <div id="baselineField" hidden style="margin-bottom:10px">
         <div class="login-row"><span class="login-state saved" id="baselineState"></span><button class="ghost small" type="button" id="baselineClear">기준 해제</button></div>
@@ -390,6 +428,7 @@
         <button class="ghost small" type="button" id="openDir">폴더 열기</button>
       </div>
     </div>
+    </details>
 
     <div class="notice warn" id="keyNotice">
       기획서 분석에는 <b id="keyNoticeProvider">AI</b> API Key가 필요합니다. 다른 AI를 쓰려면 상단 'AI 설정'에서 바꿀 수 있습니다.
@@ -462,7 +501,9 @@
     if (allRadio.disabled && allRadio.checked) document.querySelector('input[name=scope][value=single]').checked = true;
 
     const noBrowser = !document.querySelector('input[name=browser]:checked');
-    $('keyNotice').classList.toggle('show', !!selectedFile && !hasApiKey);
+    // TC 파일(CSV)은 AI 키가 없어도 규칙 매칭으로 실행된다 (키가 있으면 더 정확한 AI 매칭)
+    const tcFile = !!selectedFile && /\.(csv|tsv)$/i.test(selectedFile.name);
+    $('keyNotice').classList.toggle('show', !!selectedFile && !hasApiKey && !tcFile);
     $('runBasic').disabled = running || noBrowser || (!url && !selectedFile);
     // AI 테스트는 화면을 봐야 하므로 URL 이 필요
     $('runAi').disabled = running || noBrowser || !url;
@@ -597,6 +638,8 @@
     if (file.type) return file.type;
     if (/\.md$/i.test(file.name)) return 'text/markdown';
     if (/\.txt$/i.test(file.name)) return 'text/plain';
+    if (/\.csv$/i.test(file.name)) return 'text/csv';
+    if (/\.tsv$/i.test(file.name)) return 'text/tab-separated-values';
     return '';
   }
 
@@ -665,6 +708,7 @@
     const info = url ? await fetch(`/api/baseline?url=${encodeURIComponent(url)}&scope=${scope}`).then((r) => r.json()).catch(() => null) : null;
     $('baselineField').hidden = !(info && info.exists);
     if (info && info.exists) {
+      $('optionalGroup').open = true; // 기준이 있으면 [선택] 묶음을 펼쳐서 보여준다
       $('baselineState').textContent = `승인된 기준 있음 · ${new Date(info.approvedAt).toLocaleString('ko-KR')} 승인${info.approvedBy ? ` (${info.approvedBy})` : ''} · 페이지 ${info.pages}개${info.appVersion ? ` · v${info.appVersion}` : ''}`;
     }
   }
@@ -675,9 +719,36 @@
   });
   document.querySelectorAll('input[name=scope]').forEach((r) => r.addEventListener('change', refreshBaseline));
 
+  // 프로젝트: 이 사이트를 전에 실행했으면 그때 설정(범위 · 브라우저)으로 채운다.
+  // 전체 동작 확인은 데이터가 바뀌는 설정이라 자동으로 켜지 않는다
+  let projectHost = null;
+  async function loadProject(url) {
+    const host = new URL(url).host;
+    if (host === projectHost) return;
+    projectHost = host;
+    const saved = await fetch(`/api/project?url=${encodeURIComponent(url)}`).then((r) => r.json()).catch(() => null);
+    const cfg = saved && saved.config;
+    if (!cfg || host !== projectHost) {
+      $('projectState').hidden = true;
+      return;
+    }
+    const scopeEl = document.querySelector(`input[name=scope][value=${cfg.scope.mode === 'single' ? 'single' : 'all'}]`);
+    if (scopeEl) scopeEl.checked = true;
+    document.querySelectorAll('input[name=browser]').forEach((el) => (el.checked = cfg.runtime.browsers.includes(el.value)));
+    $('locale').value = cfg.runtime.locale || '';
+    document.querySelectorAll('input[name=xlt]').forEach((el) => (el.checked = (cfg.runtime.xltLocales || []).includes(el.value)));
+    $('projectState').textContent = `${host} 의 지난 설정(${new Date(saved.savedAt).toLocaleString('ko-KR')})으로 채웠습니다 · 범위 · 브라우저 · 언어`;
+    $('projectState').hidden = false;
+    refreshForm();
+    refreshBaseline();
+  }
+
   function onUrlChange() {
     clearTimeout(window.__baselineTimer);
-    window.__baselineTimer = setTimeout(refreshBaseline, 500);
+    window.__baselineTimer = setTimeout(() => {
+      refreshBaseline();
+      if (validUrl()) loadProject(validUrl());
+    }, 500);
     clearTimeout(checkTimer);
     const url = validUrl();
     $('loginNotice').classList.remove('show');
@@ -748,7 +819,20 @@
       }
     }
     const baselineRun = !$('baselineField').hidden && $('baselineRun').checked;
-    const res = await fetch('/api/run', { method: 'POST', body: JSON.stringify({ url, scope, mode, browsers, file, useLogin, clickAll, baselineRun }) });
+    // 실행 설정(runConfig): 비밀값은 값이 아니라 저장된 id 만 담는다
+    const runConfig = {
+      target: { url },
+      runtime: {
+        browsers,
+        locale: $('locale').value || null,
+        xltLocales: [...document.querySelectorAll('input[name=xlt]:checked')].map((el) => el.value),
+      },
+      scope: { mode: scope },
+      spec: { file },
+      safety: { clickAll },
+      mode, useLogin, baselineRun,
+    };
+    const res = await fetch('/api/run', { method: 'POST', body: JSON.stringify(runConfig) });
     if (!res.ok) return showError((await res.json()).error || '실행할 수 없습니다.');
   }
   $('runBasic').addEventListener('click', () => start('basic'));
@@ -1072,13 +1156,14 @@
       </div>
       ${baselineBar(r)}
       ${errors}
+      ${(r.notices || []).map((n) => `<div class="notice warn show">ℹ️ ${esc(n)}</div>`).join("")}
       ${r.tests ? renderTests(r.tests, r.reportUrl) : ''}
       ${renderCoverage(r.coverage, r.coveragePages)}
       ${renderChanges(r.changes)}
       ${renderDataActions(r.dataActions)}
       ${renderTypos(r.typos)}
       ${r.ai ? renderDoc(r.ai.doc, r.ai.csvUrl, 'AI 분석 TC', renderFindings(r.ai.findings)) : ''}
-      ${r.doc ? renderDoc(r.doc, r.docCsvUrl) : ''}`;
+      ${r.doc ? renderDoc(r.doc, r.docCsvUrl, r.doc.imported ? '내 TC 대비 자동화 현황' : '기획서 기반 TC') : ''}`;
     el.classList.add('show');
   }
 

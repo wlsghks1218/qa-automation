@@ -160,13 +160,23 @@ function inventoryText(analysis) {
   return lines.join('\n');
 }
 
-async function mapDocToFeatures(doc, analysis, llm) {
-  const tcText = doc.testCases
-    .map((tc) => `- ${tc.id} [${tc.feature}] ${tc.title}\n  절차: ${tc.steps.join(' → ')}\n  기대 결과: ${tc.expected}`)
-    .join('\n');
-  const prompt = `${MAPPING_PROMPT}\n\n[기획서 TC]\n${tcText}\n\n[화면 요소 목록]\n${inventoryText(analysis)}`;
-  const result = await generateJson({ ...llm, parts: [{ kind: 'text', text: prompt }], schema: MAPPING_SCHEMA });
-  return validateMappings(doc, analysis, result.mappings || []);
+// 한 번에 보내는 TC 수 (사용자 TC 파일은 수백 건이라 나눠서 매핑)
+const MAP_CHUNK = 40;
+
+async function mapDocToFeatures(doc, analysis, llm, onProgress = () => {}) {
+  const inventory = inventoryText(analysis);
+  const mappings = [];
+  for (let i = 0; i < doc.testCases.length; i += MAP_CHUNK) {
+    const chunk = doc.testCases.slice(i, i + MAP_CHUNK);
+    const tcText = chunk
+      .map((tc) => `- ${tc.id} [${tc.feature}] ${tc.title}${tc.precondition ? `\n  사전조건: ${tc.precondition}` : ''}\n  절차: ${tc.steps.join(' → ')}\n  기대 결과: ${tc.expected}`)
+      .join('\n');
+    const prompt = `${MAPPING_PROMPT}\n\n[기획서 TC]\n${tcText}\n\n[화면 요소 목록]\n${inventory}`;
+    const result = await generateJson({ ...llm, parts: [{ kind: 'text', text: prompt }], schema: MAPPING_SCHEMA });
+    mappings.push(...(result.mappings || []));
+    onProgress(Math.min(i + MAP_CHUNK, doc.testCases.length), doc.testCases.length);
+  }
+  return validateMappings(doc, analysis, mappings);
 }
 
 /** LLM 결과 검증: 없는 요소 ID, 누락된 TC, 실행 불가능한 계획은 자동화 대상에서 제외 */

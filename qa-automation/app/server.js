@@ -10,10 +10,13 @@ const {
 require('dotenv').config({ path: ENV_PATH, quiet: true });
 
 const { generateDocTestCases, mapDocToFeatures, toCsv } = require('./doc-testcases');
+const { importTcFile, looksLikeTcFile, ruleMapTcs } = require('./tc-import');
 const { PROVIDERS } = require('./llm');
 const { analyzeSiteWithAi } = require('./site-ai');
 const { buildCasesHtml } = require('./cases-report');
-const { encryptionAvailable, sealFile, openSealed, tempPath } = require('./secure-store');
+const { encryptionAvailable, sealFile, openSealed, tempPath, createSecretStore, maskSecrets } = require('./secure-store');
+const { normalizeRunConfig, storableConfig, secretRefsOf } = require('./run-config');
+const { createProjectStore } = require('./projects');
 const { findPreviousRun, compareAnalysis } = require('./compare-runs');
 const { createBaselineStore } = require('./baseline');
 // 테스트 진행률(완료/전체)을 출력하는 리포터 → 앱 프로그레스 바
@@ -43,6 +46,9 @@ function loadSettings() {
 const settings = loadSettings();
 // 승인된 기준선 저장소 (URL · 범위별)
 const baselines = createBaselineStore(path.join(USER_DIR, 'baselines'));
+// 비밀값(암호화) · 사이트별 마지막 실행 설정
+const secrets = createSecretStore(path.join(USER_DIR, 'secrets'));
+const projects = createProjectStore(path.join(USER_DIR, 'projects'));
 const runDirs = new Map(); // 실행 ID → 결과 폴더 (폴더 설정을 바꿔도 이번 세션 결과 링크 유지)
 
 function saveSettings() {
@@ -164,8 +170,22 @@ function broadcast(event, data) {
   clients.forEach((res) => res.write(payload));
 }
 
+// 이번 실행에서 꺼낸 비밀값 (로그에 나오면 **** 로 가린다)
+const activeSecrets = new Set();
+
+/** 비밀값을 꺼내 쓸 때는 반드시 이 함수로 (로그 가림 목록에 등록) */
+function useSecret(id) {
+  const value = id ? secrets.readSecret(id) : null;
+  const collect = (v) => {
+    if (typeof v === 'string') activeSecrets.add(v);
+    else if (v && typeof v === 'object') Object.values(v).forEach(collect);
+  };
+  collect(value);
+  return value;
+}
+
 function log(line) {
-  const clean = line.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').replace(/\r/g, '');
+  const clean = maskSecrets(line, activeSecrets).replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').replace(/\r/g, '');
   if (!clean.trim()) return;
   state.logs.push(clean);
   if (state.logs.length > 2000) state.logs.shift();
@@ -413,6 +433,8 @@ function summarizeReport(jsonPath) {
 /** 기획서/AI 분석 TC 마다 매핑 상태 + 실행 결과(브라우저별)를 붙인다 */
 const SEVERITY = ['passed', 'skipped', 'flaky', 'failed'];
 const BROWSER_LABEL = { chromium: 'Chrome', webkit: 'Safari', firefox: 'Firefox' };
+// 화면 언어별 시간대 (날짜 · 시간 표시가 언어와 맞도록)
+const LOCALE_TZ = { 'ko-KR': 'Asia/Seoul', 'en-US': 'America/New_York', 'ja-JP': 'Asia/Tokyo', 'zh-TW': 'Asia/Taipei', 'th-TH': 'Asia/Bangkok' };
 
 function attachDocResults(doc, mappings, tests, group) {
   const runs = tests ? tests.groups.filter((g) => g.title.startsWith(`[${group}]`)).flatMap((g) => g.tests) : [];
@@ -445,12 +467,29 @@ function attachDocResults(doc, mappings, tests, group) {
   };
 }
 
-async function runJob({ url, scope, file, mode, browsers, useLogin, clickAll, baselineRun }) {
+async function runJob(config) {
+  const url = config.target.url;
+  // 범위 'pages' · 'changes' 는 아직 실행기가 없으므로 전체 사이트로 처리
+  const scope = config.scope.mode === 'single' ? 'single' : 'all';
+  const { mode, useLogin, baselineRun } = config;
+  const file = config.spec.file;
+  const browsers = config.runtime.browsers;
+  const clickAll = config.safety.clickAll;
   const id = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const runDir = path.join(settings.resultsDir, id);
   fs.mkdirSync(runDir, { recursive: true });
   runDirs.set(id, runDir);
   state.logFile = path.join(runDir, 'run.log');
+  activeSecrets.clear();
+  // 이번 실행 설정 기록 (비밀값은 id 만, 기획서는 파일 이름만) · 사이트별 마지막 설정 저장
+  fs.writeFileSync(path.join(runDir, 'run-config.json'), JSON.stringify(storableConfig(config), null, 2), 'utf-8');
+  if (url) {
+    try {
+      projects.save(config);
+    } catch (e) {
+      log(`[경고] 실행 설정을 저장하지 못했습니다: ${e.message}`);
+    }
+  }
 
   state.running = true;
   state.stopRequested = false;
@@ -474,7 +513,16 @@ async function runJob({ url, scope, file, mode, browsers, useLogin, clickAll, ba
 
   try {
     // 1) 기획서 → TC
-    if (file) {
+    if (file && looksLikeTcFile(file)) {
+      // 사용자 TC 파일(CSV · TSV): AI 로 새로 쓰지 않고 그대로 가져온다 → 화면과 짝지어 '내 TC 대비 자동화 현황'
+      try {
+        result.doc = importTcFile(file);
+        log(`[TC 가져오기] ${file.name}: TC ${result.doc.testCases.length}건 · 섹션 ${result.doc.features.length}개`);
+      } catch (e) {
+        result.errors.push(`TC 파일 읽기 실패: ${e.message}`);
+        log(`[TC 가져오기] 실패: ${e.message}`);
+      }
+    } else if (file) {
       setPhase('기획서 분석 및 TC 작성 중');
       log(`[기획서] ${file.name} 분석 중 (${llm.label} · ${llm.model})...`);
       try {
@@ -490,7 +538,8 @@ async function runJob({ url, scope, file, mode, browsers, useLogin, clickAll, ba
     if (url) {
       // 2) 사이트 분석 → 기능별 TC 생성.
       //    기획서가 있으면 기획서가 다루는 화면을 찾기 위해 범위와 관계없이 세부 페이지까지 분석한다.
-      const crawlScope = result.doc ? 'all' : scope;
+      // 기획서로 TC 를 새로 쓴 경우는 기획서가 다루는 화면을 찾기 위해 세부 페이지까지, 가져온 TC 파일은 고른 범위를 따른다
+      const crawlScope = result.doc && !result.doc.imported ? 'all' : scope;
       setPhase(crawlScope === 'all' ? '사이트 및 세부 페이지 분석 중' : '입력한 페이지 분석 중');
       // 저장된 로그인이 있고 사용하기로 했으면 분석·테스트 모두 로그인된 상태로 (데이터가 바뀌는 버튼은 누르지 않는 안전 모드)
       if (useLogin && authInfo(url).saved) {
@@ -525,6 +574,9 @@ async function runJob({ url, scope, file, mode, browsers, useLogin, clickAll, ba
           QA_CACHE_DIR: path.join(USER_DIR, 'cache'),
           ...loginEnv,
           ...(clickAll ? { QA_CLICK_ALL: '1' } : {}),
+          // 화면 언어: 언어마다 다른 화면이 나오는 서비스가 있으므로 고를 수 있게 (비우면 이 PC 언어)
+          ...(config.runtime.locale ? { LOCALE: config.runtime.locale, TIMEZONE: LOCALE_TZ[config.runtime.locale] } : {}),
+          ...(config.runtime.xltLocales.length ? { XLT_LOCALES: config.runtime.xltLocales.join(',') } : {}),
         });
         checkStop();
         if (genCode !== 0) throw new Error('사이트 분석에 실패했습니다. 로그를 확인해주세요.');
@@ -540,6 +592,7 @@ async function runJob({ url, scope, file, mode, browsers, useLogin, clickAll, ba
       // 커버리지: 찾은 클릭 요소 중 동작까지 확인한 비율과 테스트하지 못한 요소
       result.coverage = analysis.coverage || null;
       result.coveragePages = analysis.pages.filter((p) => p.coverage).map((p) => ({ path: p.path, ...p.coverage }));
+      result.notices = analysis.notices || [];
       // 규칙 기반 오타 의심 (LLM 없이). 테스트 실패가 아니라 경고로 따로 보여준다
       result.typos = analysis.typos || [];
       // 전체 동작 확인으로 실제로 눌린 데이터 변경 버튼 (정리 · 확인용)
@@ -580,7 +633,13 @@ async function runJob({ url, scope, file, mode, browsers, useLogin, clickAll, ba
       if (result.doc) {
         setPhase('기획서 TC와 화면 요소 매핑 중');
         try {
-          mappings = await mapDocToFeatures(result.doc, analysis, llm);
+          // AI 키가 없으면(가져온 TC 파일만 해당) 화면 요소 이름 · 문구 기준 규칙 매칭
+          if (llm.apiKey) {
+            mappings = await mapDocToFeatures(result.doc, analysis, llm, (done, total) => log(`[매핑] ${done}/${total}건`));
+          } else {
+            mappings = ruleMapTcs(result.doc, analysis);
+            log('[매핑] AI 키가 없어 화면 요소 이름 · 문구가 같은 TC 만 규칙으로 짝지었습니다.');
+          }
           fs.writeFileSync(path.join(runDir, 'doc-mappings.json'), JSON.stringify(mappings, null, 2), 'utf-8');
           docSpecCount = writeDocSpecs({ doc: result.doc, mappings, analysis, outDir: path.join(GENERATED_DIR, 'doc') });
           const c = (s) => mappings.filter((m) => m.status === s).length;
@@ -663,6 +722,7 @@ async function runJob({ url, scope, file, mode, browsers, useLogin, clickAll, ba
     state.running = false;
     state.logFile = null;
     if (authHandle) authHandle.cleanup();
+    activeSecrets.clear();
     state.result = result;
     setPhase('');
     broadcast('done', result);
@@ -873,17 +933,19 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && pathname === '/api/run') {
       if (state.running) return json(res, 409, { error: '이미 실행 중인 작업이 있습니다.' });
-      const body = await readJson(req);
-      const url = (body.url || '').trim();
-      const scope = body.scope === 'single' ? 'single' : 'all';
-      const mode = body.mode === 'ai' ? 'ai' : 'basic';
-      const browsers = (Array.isArray(body.browsers) ? body.browsers : []).filter((b) => BROWSER_LABEL[b]);
-      if (!browsers.length) browsers.push('chromium');
+      // 새 구조(runConfig)와 예전 구조(url · scope · browsers …) 모두 받는다
+      const config = normalizeRunConfig(await readJson(req));
+      const url = config.target.url;
+      const { mode } = config;
+      const file = config.spec.file;
       if (mode === 'ai' && !url) return json(res, 400, { error: 'AI 테스트는 URL이 필요합니다.' });
-      if ((mode === 'ai' || body.file) && !currentLlm().apiKey) {
+      // 사용자 TC 파일(CSV)은 AI 없이도 규칙 매칭으로 실행할 수 있다
+      if ((mode === 'ai' || (file && !looksLikeTcFile(file))) && !currentLlm().apiKey) {
         return json(res, 400, { error: `${currentLlm().label} API Key가 필요합니다. 상단 'AI 설정'에서 입력해주세요.` });
       }
-      if (!url && !body.file) return json(res, 400, { error: 'URL 또는 기획서를 입력해주세요.' });
+      if (!url && !file) return json(res, 400, { error: 'URL 또는 기획서를 입력해주세요.' });
+      const missing = secretRefsOf(config).filter((ref) => secrets.readSecret(ref) === null);
+      if (missing.length) return json(res, 400, { error: `저장된 비밀값을 찾을 수 없습니다 (${missing.join(', ')}). 다시 입력해주세요.` });
       if (url) {
         try {
           if (!/^https?:$/.test(new URL(url).protocol)) throw new Error();
@@ -892,8 +954,42 @@ const server = http.createServer(async (req, res) => {
         }
       }
       if (loginSession) return json(res, 409, { error: '로그인 창이 열려 있습니다. 로그인을 끝내고 "로그인 완료"를 누르거나 취소해주세요.' });
-      runJob({ url, scope, mode, browsers, file: body.file || null, useLogin: body.useLogin !== false, clickAll: body.clickAll === true, baselineRun: body.baselineRun === true });
+      runJob(config);
       return json(res, 202, { ok: true });
+    }
+
+    // 비밀값: 값은 받기만 하고 절대 돌려주지 않는다 (목록은 id · 이름 · 저장 시각만)
+    if (pathname === '/api/secrets' && req.method === 'GET') {
+      return json(res, 200, { encryption: encryptionAvailable(), secrets: secrets.listSecrets() });
+    }
+    if (pathname === '/api/secrets' && req.method === 'POST') {
+      const body = await readJson(req);
+      if (body.value === undefined || body.value === null || body.value === '') return json(res, 400, { error: '저장할 값이 없습니다.' });
+      try {
+        const id = secrets.saveSecret(body.id || null, body.value, body.label);
+        return json(res, 200, { id });
+      } catch (e) {
+        return json(res, 400, { error: e.message });
+      }
+    }
+    if (pathname === '/api/secrets/delete' && req.method === 'POST') {
+      const body = await readJson(req);
+      try {
+        secrets.deleteSecret(body.id);
+      } catch (e) {
+        return json(res, 400, { error: e.message });
+      }
+      return json(res, 200, { ok: true });
+    }
+
+    // 프로젝트: 이 사이트의 마지막 실행 설정 (입력 화면 자동 채우기)
+    if (pathname === '/api/project' && req.method === 'GET') {
+      const saved = projects.get(new URL(req.url, 'http://x').searchParams.get('url') || '');
+      return json(res, 200, saved || { config: null });
+    }
+    if (pathname === '/api/project/clear' && req.method === 'POST') {
+      projects.remove((await readJson(req)).url || '');
+      return json(res, 200, { config: null });
     }
 
     res.writeHead(404).end('Not found');

@@ -15,7 +15,9 @@ function locatorCode(spec) {
     css: () => `page.locator(${JSON.stringify(spec.selector)})`,
     text: () => `page.locator(${JSON.stringify(spec.tag)}).filter({ hasText: ${name} })`,
   }[spec.kind]();
-  return `${base}.nth(${spec.nth})`;
+  // 같은 이름의 요소가 번갈아 보이는 경우(로고 애니메이션 · 반응형 중복 메뉴)가 있으므로 보이는 것 중에서 순서를 센다.
+  // 건너뛰기 링크처럼 평소 숨어 있는 요소(anyVisibility)는 숨어 있어도 찾는다
+  return spec.anyVisibility ? `${base}.nth(${spec.nth})` : `${base}.filter({ visible: true }).nth(${spec.nth})`;
 }
 
 /**
@@ -47,7 +49,7 @@ function specHeader({ describeTitle, env, supportPath, generator }) {
   return [
     `// 자동 생성 파일 - ${generator} 로 재생성됩니다. 직접 수정하지 마세요.`,
     `import { test, expect } from '@playwright/test';`,
-    `import { openPage, expectNoBrokenImages, checks, expectShownInRotation, listRows, pickTerm, tableData, brokenImages, firstFound, mobileOverflow, perfMetrics, axeScan } from '${supportPath}';`,
+    `import { openPage, expectNoBrokenImages, checks, expectShownInRotation, listRows, pickTerm, tableData, brokenImages, firstFound, mobileOverflow, perfMetrics, axeScan, textIssues, errorScreenText } from '${supportPath}';`,
     ``,
     `test.describe(${JSON.stringify(describeTitle)}, () => {`,
     `  test.skip(({ isMobile }) => isMobile, '데스크톱(${env.viewport.width}x${env.viewport.height}) 기준으로 분석된 시나리오입니다.');`,

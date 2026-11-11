@@ -77,6 +77,10 @@ const INTERACTIVE_SELECTOR = [
 ].join(', ');
 
 // Cloudflare 등 봇 차단/보안 확인 페이지
+// 오류 · 이용 불가 안내 화면 (tests/support/site.ts 의 ERROR_SCREEN 과 동일하게 유지)
+const ERROR_SCREEN = /(이용s*불가|사용할 수 없|지원(되|하)지 않|접근(이)?s*(제한|거부|불가)|권한이 없|오류가 발생|일시적인 오류|서비스 점검|nots+(available|supported)|unavailable|accesss+denied|forbidden|something went wrong|ご利用いただけません|エラーが発生|アクセスできません)/i;
+// 다국어(XLT) 확인 언어 목록: 기본 언어로 분석하고, 이 언어들로도 화면을 열어 번역 · 치환 상태를 확인
+const XLT_LOCALES = (process.env.XLT_LOCALES || '').split(',').map((l) => l.trim()).filter(Boolean);
 const BOT_CHECK = /just a moment|attention required|verify you are human|checking your browser|잠시만 기다리십시오|보안 확인 수행 중|사람인지 확인/i;
 
 // 모달/시트 안의 닫기 컨트롤
@@ -89,6 +93,17 @@ const PAGE_TYPE_LABEL = { form: '입력폼형', list: '목록형', document: '�
 // ─────────────────────────────────────────────────────────────
 // 공통 유틸
 // ─────────────────────────────────────────────────────────────
+
+/** (브라우저 안에서 실행) 저장된 sessionStorage 를 같은 사이트에만, 아직 없는 값만 채운다. tests/support/site.ts 와 동일 */
+function restoreSessionStorage(saved) {
+  const s = saved.find((x) => x.origin === location.origin);
+  if (!s) return;
+  try {
+    for (const { name, value } of s.items) if (sessionStorage.getItem(name) === null) sessionStorage.setItem(name, value);
+  } catch {
+    // 저장소를 쓸 수 없는 페이지
+  }
+}
 
 async function dismissPopups(page) {
   for (let i = 0; i < 4; i++) {
@@ -282,7 +297,11 @@ async function pageState(page) {
         lines: text.split('\n').map((t) => t.trim().replace(/\s+/g, ' ')).filter(Boolean),
       });
     }
-    return { url: location.href, lines, overlays };
+    // 지금 선택된 항목 (시트를 열었을 때 새로 보이는 기본 선택 상태를 구분하기 위해)
+    const selected = Array.from(document.querySelectorAll('[role="radio"], input[type="radio"], [role="checkbox"], input[type="checkbox"], [role="tab"], [role="option"]'))
+      .filter((e) => e.getBoundingClientRect().width > 0 && (e.checked || e.getAttribute('aria-checked') === 'true' || e.getAttribute('aria-selected') === 'true'))
+      .map((e) => `${e.getAttribute('role') || (e.type === 'radio' ? 'radio' : 'checkbox')}|${(e.getAttribute('aria-label') || (e.labels && e.labels[0] && e.labels[0].innerText) || e.innerText || '').trim().replace(/\s+/g, ' ')}`);
+    return { url: location.href, lines, overlays, selected };
   });
 }
 
@@ -329,7 +348,8 @@ async function collectCandidates(page) {
       const r = el.getBoundingClientRect();
       const s = getComputedStyle(el);
       if (r.width === 0 || r.height === 0 || s.visibility === 'hidden' || s.display === 'none') return;
-      if (el.disabled) return;
+      // 비활성 요소(로그인 전 잔액 링크 등)도 '비활성 상태로 보이는지'를 확인 대상으로 남긴다
+      const disabled = !!(el.disabled || el.getAttribute('aria-disabled') === 'true');
 
       el.setAttribute('data-qa-idx', String(idx));
       // 공통 영역: 헤더 · 푸터 · 사이트 메뉴. 본문 안 내비게이션(페이지 번호 · 목차 · 탭 목록)은 그 페이지의 기능
@@ -348,6 +368,13 @@ async function collectCandidates(page) {
       if (tag === 'a' && href && href.length > 1 && href.startsWith('#')) {
         const id = decodeURIComponent(href.slice(1));
         if (document.getElementById(id)) anchorId = id;
+      }
+      // 건너뛰기 링크(본문 바로가기 등): 평소엔 투명하거나 화면 밖에 있다가 키보드 포커스 때만 보인다 → 클릭이 아니라 Tab 포커스 + Enter 로 확인
+      let skipLink = false;
+      if (anchorId) {
+        let transparent = false;
+        for (let a = el; a && a !== document.body; a = a.parentElement) if (Number(getComputedStyle(a).opacity) === 0) transparent = true;
+        skipLink = transparent || r.bottom <= 0 || r.right <= 0 || r.left >= innerWidth || (r.width <= 2 && r.height <= 2);
       }
 
       // 입력 요소: 라벨/placeholder(셀렉터용), 같은 폼의 제출 버튼(활성화 검증용), select 의 선택 가능한 값
@@ -425,6 +452,10 @@ async function collectCandidates(page) {
         target: el.getAttribute('target'),
         zone: zone ? 'common' : 'main',
         anchorId,
+        skipLink,
+        disabled,
+        // 화면 낭독기에서 숨긴 영역(무한 스크롤 배너의 복제본 등)
+        ariaHidden: !!el.closest('[aria-hidden="true"]'),
         label,
         placeholder,
         formButton,
@@ -518,6 +549,12 @@ async function resolveLocator(page, cand) {
     const spec = await tryLocator({ kind: 'css', selector: attrSelector, role: role || cand.tag, name });
     if (spec) return spec;
   }
+  // 마지막 수단: 이름도 고유 속성도 없는 아이콘 버튼(뒤로가기 화살표 등)은 화면 구조 경로로 찾는다.
+  // 구조가 바뀌면 깨질 수 있고, 화면 낭독기 이름이 없는 것 자체가 접근성 문제이므로 결과에 함께 표시한다
+  if (cand.cssPath && cand.hasImg && !cand.lines.length) {
+    const spec = await tryLocator({ kind: 'css', selector: cand.cssPath, role: role || cand.tag, name, unnamed: true });
+    if (spec) return spec;
+  }
   return null;
 }
 
@@ -532,7 +569,7 @@ function buildLocator(page, spec) {
     placeholder: () => page.getByPlaceholder(spec.name, { exact: true }),
     css: () => page.locator(spec.selector),
     text: () => page.locator(spec.tag).filter({ hasText: spec.name }),
-  }[spec.kind]();
+  }[spec.kind]().filter({ visible: true });
   return spec.nth === undefined ? base : base.nth(spec.nth);
 }
 
@@ -751,21 +788,33 @@ async function probeClick(page, loc, spec, noisy) {
   const pagerLike = PAGER.test(spec.name || '');
   const listBefore = pagerLike ? (await page.evaluate(listRowsInPage).catch(() => [])).join('|') : '';
 
+  // 같은 주소로 다시 불러오는 링크(현재 페이지를 가리키는 로고 등) 구분용 표시: 새로 불러오면 사라진다
+  await page.evaluate(() => (window.__qaLoaded = true)).catch(() => {});
   let popup = null;
   let download = null;
   const onPopup = (p) => (popup = p);
   const onDownload = (d) => (download = d);
-  page.on('popup', onPopup);
+  page.context().on('page', onPopup); // rel="noopener · noreferrer" 새 탭은 page 의 popup 이벤트가 오지 않으므로 브라우저 단위로 감지
   page.on('download', onDownload);
   try {
-    await loc.click({ timeout: 5000 });
+    // 저절로 움직이는 요소는 '멈출 때까지' 기다리면 끝나지 않으므로 마우스를 올린 뒤 바로 누른다
+    if (spec.moving) {
+      await loc.hover({ force: true, timeout: 3000 });
+      await loc.click({ force: true, timeout: 5000 });
+    } else {
+      await loc.click({ timeout: 5000 });
+    }
   } catch (e) {
-    page.off('popup', onPopup);
+    page.context().off('page', onPopup);
     page.off('download', onDownload);
     return { type: 'unclickable', reason: e.message.split('\n')[0], dirty: true };
   }
   await page.waitForTimeout(1500);
-  page.off('popup', onPopup);
+  // 새 탭이 늦게 열리는 링크(외부 마켓 등)가 있으므로 화면 변화가 없으면 조금 더 기다린다
+  if (!popup && !download && stripHash(page.url()) === stripHash(before.url)) {
+    await page.context().waitForEvent('page', { timeout: 2500 }).then((p) => (popup = p)).catch(() => {});
+  }
+  page.context().off('page', onPopup);
   page.off('download', onDownload);
 
   // 파일 다운로드 (엑셀 다운로드 등): 파일 이름 기록, 테스트에서 파일이 비어 있지 않은지 확인
@@ -787,8 +836,14 @@ async function probeClick(page, loc, spec, noisy) {
     await page.waitForLoadState('domcontentloaded').catch(() => {});
     // 브라우저 오류 페이지(연결 실패/차단)로 이동하면 깨진 링크로 기록
     if (/^chrome-error:/.test(page.url())) return { type: 'brokenLink', dirty: true };
-    // 직접 연 페이지에서 '뒤로가기' 등은 about:blank 로 간다 → 테스트로 재현할 의미가 없음
+    // 직접 연 페이지에서 누르니 이전 화면(빈 탭)으로 돌아감 → 뒤로가기 버튼
+    if (page.url() === 'about:blank') return { type: 'back', dirty: true };
     if (!/^https?:/.test(page.url())) return { type: 'none', dirty: true };
+    return { type: 'navigate', url: page.url(), dirty: true };
+  }
+  // 주소는 같지만 페이지를 새로 불러옴 → 같은 페이지로 이동 (새로 뜬 팝업 · 안내를 클릭 결과로 오해하지 않도록 여기서 끝낸다)
+  if (/^https?:/.test(page.url()) && !(await page.evaluate(() => window.__qaLoaded === true).catch(() => true))) {
+    await page.waitForLoadState('domcontentloaded').catch(() => {});
     return { type: 'navigate', url: page.url(), dirty: true };
   }
 
@@ -813,7 +868,8 @@ async function probeClick(page, loc, spec, noisy) {
   // 숫자만 바뀐 줄(새로고침 후 '전체 690건' → '693건', 시계 등)은 새로 나타난 문구로 보지 않는다
   const shape = (t) => t.replace(/\d+(?:[.,:]\d+)*/g, '#');
   const beforeShapes = new Set(before.lines.map(shape));
-  const fresh = (t) => !beforeShapes.has(shape(t)) && !noisy.has(t) && isAssertableText(t);
+  // 다시 나타난 팝업 · 안내 띠(닫기 · "보지 않기" 문구가 든 줄)는 클릭 결과가 아니다
+  const fresh = (t) => !beforeShapes.has(shape(t)) && !noisy.has(t) && isAssertableText(t) && !POPUP_DISMISS.test(t) && !isPopupControl(t);
 
   const beforeKeys = new Set(before.overlays.map((o) => o.key));
   const newOverlay = after.overlays.find((o) => !beforeKeys.has(o.key));
@@ -825,7 +881,27 @@ async function probeClick(page, loc, spec, noisy) {
         break;
       }
     }
-    if (text) return { type: 'modal', text, ...(await probeDialogClose(page, text)), dirty: true };
+    if (text) {
+      // 시트 · 모달 안의 항목(메뉴 · 제목)을 화면 순서대로 기록 → 테스트에서 항목과 순서까지 확인
+      const items = [];
+      for (const t of newOverlay.lines) {
+        if (items.length >= 8) break;
+        if (items.includes(t) || noisy.has(t) || !isAssertableText(t) || t.length > 40) continue;
+        if (await isVisibleText(page, t)) items.push(t);
+      }
+      // 시트 안에서 선택되어 있는 항목(라디오 · 체크박스 · 선택된 탭): 기본 선택 상태도 기획 대상이다
+      const selected = await page
+        .evaluate(() =>
+          Array.from(document.querySelectorAll('[role="radio"], input[type="radio"], [role="checkbox"], input[type="checkbox"], [role="tab"], [role="option"]'))
+            .filter((e) => e.getBoundingClientRect().width > 0 && (e.checked || e.getAttribute('aria-checked') === 'true' || e.getAttribute('aria-selected') === 'true'))
+            .map((e) => ({ role: e.getAttribute('role') || (e.type === 'radio' ? 'radio' : 'checkbox'), name: (e.getAttribute('aria-label') || (e.labels && e.labels[0] && e.labels[0].innerText) || e.innerText || '').trim().replace(/\s+/g, ' ') }))
+            .filter((x) => x.name && x.name.length <= 30)
+        )
+        .catch(() => []);
+      const selectedBefore = new Set(before.selected || []);
+      const newlySelected = selected.filter((x) => !selectedBefore.has(`${x.role}|${x.name}`)).slice(0, 4);
+      return { type: 'modal', text, ...(items.length >= 2 ? { items } : {}), ...(newlySelected.length ? { selected: newlySelected } : {}), ...(await probeDialogClose(page, text)), dirty: true };
+    }
   }
 
   if (spec.role === 'tab') {
@@ -1056,6 +1132,7 @@ async function detectRolling(page, samples = 9, interval = 700) {
 const ROLE_LABEL = { link: '링크', button: '버튼', tab: '탭', menuitem: '메뉴', combobox: '선택 박스', checkbox: '체크박스', radio: '라디오', switch: '스위치', textbox: '입력창', searchbox: '검색창' };
 function kindOf(cand, spec) {
   if (cand.tag === 'summary') return '펼치기';
+  if (spec.unnamed) return `이름 없는 아이콘 ${ROLE_LABEL[spec.role] || cand.tag}`;
   const base = ROLE_LABEL[spec.role] || cand.tag;
   if (cand.hasImg && !cand.lines.length) {
     // 헤더 왼쪽 위의 이미지 링크는 대부분 로고
@@ -1123,6 +1200,19 @@ async function analyzePage(newContext, pagePath, { commonSignatures, collectComm
       return result;
     }
 
+    // 오류 · 이용 불가 안내 화면: 테스트는 계속 만들지만(그 화면이 기획상 맞을 수 있음) 결과에 알린다
+    result.errorScreen = await page
+      .evaluate((src) => {
+        const re = new RegExp(src, 'i');
+        const visible = (el) => el.getBoundingClientRect().width > 0;
+        const clickable = Array.from(document.querySelectorAll('a[href], button, [role="button"], input, select, textarea')).filter(visible).length;
+        if (clickable > 4) return null;
+        const heads = Array.from(document.querySelectorAll('h1, h2, h3, [role="heading"]')).filter(visible).map((h) => h.innerText.trim());
+        return heads.find((h) => re.test(h)) || null;
+      }, ERROR_SCREEN.source)
+      .catch(() => null);
+    if (result.errorScreen) console.warn(`   · [${tag}] [주의] 안내 화면이 열림: "${result.errorScreen}" (언어 ${LOCALE}) — 이 화면 기준으로만 테스트됩니다. 언어 · 지역 · 로그인 조건을 바꿔 실행하면 실제 기능을 테스트할 수 있습니다.`);
+
     await scrollThrough(page);
 
     // AI 분석용 전체 화면 캡처 (너무 긴 페이지는 위쪽 6000px 까지)
@@ -1143,7 +1233,7 @@ async function analyzePage(newContext, pagePath, { commonSignatures, collectComm
         .catch(() => '');
       cacheKey = require('crypto')
         .createHash('md5')
-        .update([APP_VERSION, STORAGE_STATE ? 'login' : '', CLICK_ALL ? 'all' : '', collectCommon, commonAsFeatures, structure].join('\n'))
+        .update([APP_VERSION, LOCALE, STORAGE_STATE ? 'login' : '', CLICK_ALL ? 'all' : '', collectCommon, commonAsFeatures, structure].join('\n'))
         .digest('hex');
       const hit = analysisCache[url];
       if (hit && hit.key === cacheKey) {
@@ -1271,6 +1361,54 @@ async function analyzePage(newContext, pagePath, { commonSignatures, collectComm
     result.rolling = rolling;
     step(`일반 문구 ${result.texts.length}개 · 이미지 ${result.images.length}개${rolling.length ? ` · 롤링 배너 ${rolling.length}개 (문구 ${rollingTexts.size}개)` : ''} 수집`);
 
+    // 복제본: 흐르는 배너 · 무한 캐러셀은 같은 항목을 복제해 이어 붙인다. 숨김 처리된 복제본 · 목적지가 같은 같은 이름 요소는 하나만 테스트
+    const cloneKey = ({ cand, spec }) => (cand.href && !cand.href.startsWith('#') ? `${cand.tag}|${cand.href}|${cand.hasImg}` : null);
+    const kept = new Map();
+    for (const r of resolved) {
+      const k = cloneKey(r);
+      if (!k) continue;
+      const prev = kept.get(k);
+      if (!prev) {
+        kept.set(k, r);
+      } else if (r.cand.ariaHidden || !r.spec.name || r.spec.name === prev.spec.name) {
+        r.clone = true;
+      } else if (prev.cand.ariaHidden || !prev.spec.name) {
+        prev.clone = true;
+        kept.set(k, r);
+      }
+    }
+    const clones = resolved.filter((r) => r.clone);
+    if (clones.length) {
+      for (let i = resolved.length - 1; i >= 0; i--) if (resolved[i].clone) resolved.splice(i, 1);
+      cov.repeated += clones.length;
+      result.skipped.push({ reason: `복제 항목: 같은 목적지 · 같은 이름(또는 숨김 복제본) ${clones.length}개는 하나만 확인` });
+      step(`복제 항목 ${clones.length}개 (흐르는 배너 · 캐러셀 복제본 등) → 같은 목적지는 하나만 확인`);
+    }
+
+    // 움직이는 요소: 저절로 흐르는 배너 · 캐러셀. 위치를 두 번 재서 움직이면 표시 → 마우스를 올려 멈추는지까지 관찰
+    const positions = () =>
+      page
+        .evaluate((ids) => ids.map((id) => { const e = document.querySelector(`[data-qa-idx="${id}"]`); const r = e ? e.getBoundingClientRect() : null; return r && r.width > 0 && r.height > 0 ? Math.round(r.left) : null; }), resolved.map((r) => r.cand.idx))
+        .catch(() => []);
+    const p1 = await positions();
+    await page.waitForTimeout(800);
+    const p2 = await positions();
+    resolved.forEach((r, i) => {
+      if (p1[i] !== null && p2[i] !== null && Math.abs(p1[i] - p2[i]) >= 3) r.moving = true;
+    });
+    for (const r of resolved.filter((x) => x.moving)) {
+      const loc = buildLocator(page, r.spec);
+      if (!(await loc.hover({ force: true, timeout: 2000 }).then(() => true).catch(() => false))) continue;
+      await page.waitForTimeout(300);
+      const a = await loc.boundingBox().catch(() => null);
+      await page.waitForTimeout(800);
+      const b = await loc.boundingBox().catch(() => null);
+      r.pauseOnHover = !!(a && b && Math.abs(a.x - b.x) < 3);
+      await page.mouse.move(0, 0);
+    }
+    const movingCount = resolved.filter((r) => r.moving).length;
+    if (movingCount) step(`저절로 움직이는 요소 ${movingCount}개 (흐르는 배너 등) → 움직임 · 마우스 오버 시 멈춤 확인`);
+
     // 목록 반복 항목(표의 행 버튼, 달력 날짜, 같은 형식의 상세 링크 등)은 대표 1개만 테스트한다
     const repeatGroups = new Map();
     for (const r of resolved) {
@@ -1299,9 +1437,10 @@ async function analyzePage(newContext, pagePath, { commonSignatures, collectComm
 
     const probedBy = { features: 0, common: 0 };
     let n = 0;
-    for (const { cand, spec, signature, bucket, risky, repeatCount } of resolved) {
+    for (const { cand, spec, signature, bucket, risky, repeatCount, moving, pauseOnHover } of resolved) {
       n++;
-      const label = spec.name || cand.href || spec.selector || spec.role;
+      // 이름 없는 아이콘 버튼은 화면 위치로 부른다 (구조 경로는 사람이 알아보기 어렵다)
+      const label = spec.name || cand.href || (spec.unnamed ? `${cand.zone === 'common' ? '머리글' : '본문'} ${cand.pos.x < 400 ? '왼쪽' : cand.pos.x > 1000 ? '오른쪽' : '가운데'} 위치` : spec.selector) || spec.role;
       // 숫자만 있는 줄(알림 수 · 건수 · 금액 등)은 시간이 지나면 바뀌므로 문구 확인에서 뺀다
       const lines = cand.lines
         .filter((t) => !noisy.has(t) && !/^[\d\s.,:%+\-$₩()/]+$/.test(t))
@@ -1312,7 +1451,7 @@ async function analyzePage(newContext, pagePath, { commonSignatures, collectComm
         ...(spec.kind !== 'text' && lines[0] ? [{ kind: 'text', tag: cand.tag, name: lines[0] }] : []),
         ...(cand.cssPath ? [{ kind: 'css', selector: cand.cssPath }] : []),
       ];
-      const base = { label, signature, locator: spec, fallbacks, pageUrl: url, href: cand.href, kind: kindOf(cand, spec), lines, hasImg: cand.hasImg, pos: cand.pos, ...(repeatCount ? { repeatCount } : {}) };
+      const base = { label, signature, locator: spec, fallbacks, pageUrl: url, href: cand.href, kind: kindOf(cand, spec), lines, hasImg: cand.hasImg, pos: cand.pos, ...(repeatCount ? { repeatCount } : {}), ...(moving ? { moving, pauseOnHover } : {}) };
       const before = result[bucket].length;
       const where = collectCommon && bucket === 'common' ? '공통 ' : '';
       const report = (how) => {
@@ -1321,9 +1460,16 @@ async function analyzePage(newContext, pagePath, { commonSignatures, collectComm
       };
 
       // 클릭 없이 구조만으로 판별되는 패턴
+      if (cand.disabled) {
+        result[bucket].push({ ...base, type: 'disabled' });
+        report('비활성 상태 확인');
+        continue;
+      }
       if (cand.anchorId) {
         // 목차 앵커는 페이지당 10개까지만 (문서 사이트는 수십 개라 테스트가 과도하게 늘어남)
-        if (result[bucket].filter((x) => x.type === 'anchor').length < 10) {
+        if (cand.skipLink) {
+          result[bucket].push({ ...base, locator: { ...spec, anyVisibility: true }, fallbacks: [], type: 'anchor', anchorId: cand.anchorId, skipLink: true });
+        } else if (result[bucket].filter((x) => x.type === 'anchor').length < 10) {
           result[bucket].push({ ...base, type: 'anchor', anchorId: cand.anchorId });
         } else {
           result[bucket].push({ ...base, type: 'display', reason: '목차 링크 이동 확인은 페이지당 10개까지' });
@@ -1373,7 +1519,7 @@ async function analyzePage(newContext, pagePath, { commonSignatures, collectComm
       }
       probedBy[bucket]++;
 
-      const effect = await probe(page, spec, noisy, resetState);
+      const effect = await probe(page, moving ? { ...spec, moving } : spec, noisy, resetState);
       if (effect.type === 'unclickable') {
         // 클릭은 안 되더라도 화면에 있는 요소이므로 노출·문구는 확인한다
         result[bucket].push({ ...base, type: 'display', reason: `분석 중 클릭 불가: ${short(effect.reason, 60)}`, ...(effect.tooltip ? { tooltip: effect.tooltip } : {}) });
@@ -1430,6 +1576,8 @@ const TYPE_LABEL = {
   download: '파일 다운로드',
   paginate: '목록 페이지 이동',
   display: '노출·문구만 확인',
+  disabled: '비활성 상태',
+  back: '뒤로가기',
 };
 
 const SAMPLE_INPUT = { email: 'qa@example.com', number: '123', tel: '01012345678', url: 'https://example.com' };
@@ -1473,7 +1621,7 @@ function actionCode(f) {
       body.push(`expect(page.url(), '링크 이동 시 브라우저 오류 페이지가 열립니다 (연결 실패 또는 차단).').not.toMatch(/^chrome-error:/);`);
       return { action: '링크 연결 (분석 시 연결 실패)', body };
     case 'newTab': {
-      body.push(`const popupPromise = page.waitForEvent('popup');`);
+      body.push(`const popupPromise = page.context().waitForEvent('page');`);
       body.push(`await target.click();`);
       body.push(`const popup = await popupPromise;`);
       // 분석 때 새 탭 주소를 못 얻은 경우(about:blank 후 바로 닫힘 등)는 새 탭이 열리는지만 확인
@@ -1490,6 +1638,23 @@ function actionCode(f) {
       body.push(`const before = await shown.count();`);
       body.push(`await target.click();`);
       body.push(`await expect.poll(() => shown.count(), { message: ${JSON.stringify(`클릭 후 "${short(f.text, 30)}" 이(가) 나타나지 않음`)} }).toBeGreaterThan(before);`);
+      if (f.items) {
+        // 시트 안 항목이 모두 보이고 분석 때와 같은 순서(위→아래, 같은 줄이면 왼→오른)인지
+        body.push(`const items = ${JSON.stringify(f.items)};`);
+        body.push(`const boxes = [];`);
+        body.push(`for (const t of items) {`);
+        body.push(`  const el = page.getByText(t, { exact: true }).filter({ visible: true }).last();`);
+        body.push(`  await expect(el, '시트 항목이 보이지 않음: ' + t).toBeVisible();`);
+        body.push(`  boxes.push(await el.boundingBox());`);
+        body.push(`}`);
+        body.push(`const inOrder = boxes.every((b, i) => i === 0 || !b || !boxes[i - 1] || b.y > boxes[i - 1].y + 2 || (Math.abs(b.y - boxes[i - 1].y) <= 2 && b.x >= boxes[i - 1].x));`);
+        body.push(`expect(inOrder, '시트 항목 순서가 다름: ' + items.join(' › ')).toBe(true);`);
+      }
+      for (const s of f.selected || []) {
+        // 기본 선택 상태 (분석 때 선택되어 있던 항목)
+        const sel = ['tab', 'option'].includes(s.role) ? `toHaveAttribute('aria-selected', 'true')` : `toBeChecked()`;
+        body.push(`await expect(page.getByRole(${JSON.stringify(s.role)}, { name: ${JSON.stringify(s.name)}, exact: true }).filter({ visible: true }).last(), ${JSON.stringify(`기본 선택이 "${s.name}" 이(가) 아님`)}).${sel};`);
+      }
       // 모달: 분석 때 확인된 닫기 방법으로 닫히는지까지 검증
       if (f.closeName) {
         body.push(`await page.getByRole('button', { name: ${JSON.stringify(f.closeName)}, exact: true }).filter({ visible: true }).last().click();`);
@@ -1498,7 +1663,7 @@ function actionCode(f) {
         body.push(`await page.keyboard.press(${JSON.stringify(f.closeKey)});`);
         body.push(`await expect.poll(() => shown.count(), { message: '닫기 후에도 창이 남아 있음' }).toBe(before);`);
       }
-      return { action: `${TYPE_LABEL[f.type]} "${q(f.text)}"${f.closeName || f.closeKey ? ' 후 닫힘' : ''}`, body };
+      return { action: `${TYPE_LABEL[f.type]} "${q(f.text)}"${f.items ? ` · 항목 ${f.items.map((t) => q(t, 15)).join(' › ')}` : ''}${f.closeName || f.closeKey ? ' 후 닫힘' : ''}`, body };
     case 'toggle':
       body.push(`await target.click();`);
       body.push(`await expect(target).toHaveAttribute('aria-expanded', ${JSON.stringify(f.expanded)});`);
@@ -1512,6 +1677,13 @@ function actionCode(f) {
       body.push(`await expect(target).toHaveValue(${JSON.stringify(f.value)});`);
       return { action: `옵션 선택 "${q(f.value)}"`, body };
     case 'anchor':
+      if (f.skipLink) {
+        // 건너뛰기 링크: 키보드 사용자처럼 포커스 후 Enter → 대상 영역으로 이동(주소 #대상 또는 포커스가 대상 안으로)하는지
+        body.push(`await target.focus();`);
+        body.push(`await page.keyboard.press('Enter');`);
+        body.push(`await expect.poll(() => page.evaluate((id) => { const t = document.getElementById(id); return location.hash === '#' + id || (!!t && t.contains(document.activeElement)); }, ${JSON.stringify(f.anchorId)}), { message: '건너뛰기 링크로 대상 영역에 이동하지 않음' }).toBe(true);`);
+        return { action: `건너뛰기 링크 (포커스 + Enter) → #${f.anchorId}`, body };
+      }
       body.push(`await target.click();`);
       body.push(`await expect(page.locator(${JSON.stringify(`[id="${f.anchorId}"]`)})).toBeInViewport();`);
       return { action: `목차 이동 → #${f.anchorId}`, body };
@@ -1538,6 +1710,25 @@ function actionCode(f) {
       body.push(`await target.check();`);
       body.push(`await expect(target).toBeChecked();`);
       return { action: '선택(체크)', body };
+    case 'disabled':
+      // 누르지 않고 상태만 확인 (disabled 속성 또는 aria-disabled)
+      body.push(`await expect(target).toBeDisabled();`);
+      return { action: '비활성 상태 (누를 수 없음)', body };
+    case 'back': {
+      // 다른 화면에서 들어온 뒤 누르면 그 화면으로 돌아가는지 (같은 사이트 첫 화면 → 이 화면 → 뒤로가기)
+      const home = `${BASE_URL}/`;
+      if (stripHash(f.pageUrl || '') !== home) {
+        body.push(`await page.goto(${JSON.stringify(home)}, { waitUntil: 'domcontentloaded' });`);
+        body.push(`await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded' });`);
+        body.push(`await page.waitForTimeout(1500);`);
+        body.push(`await target.click();`);
+        body.push(`await expect(page).toHaveURL(${urlMatcher(home, false)});`);
+      } else {
+        body.push(`await target.click();`);
+        body.push(`await expect.poll(() => page.url(), { message: '뒤로가기를 눌러도 이전 화면으로 돌아가지 않음' }).toBe('about:blank');`);
+      }
+      return { action: '뒤로가기 → 이전 화면', body };
+    }
     default:
       body.push(`await expect(target).toBeEnabled();`);
       body.push(`await target.click();`);
@@ -1568,7 +1759,21 @@ function elementTest(f, no, typos) {
   } else {
     out.push(`    const target = ${locatorCode(f.locator)};`);
   }
-  out.push(`    await c.run('노출', async () => { await expect(target).toBeVisible(); }, { gate: true });`);
+  if (f.skipLink) {
+    // 건너뛰기 링크는 평소 숨어 있다가 키보드 포커스를 받을 때 쓰인다
+    out.push(`    await c.run('노출 (키보드 포커스 시)', async () => { await target.focus(); await expect(target).toBeFocused(); }, { gate: true });`);
+  } else {
+    out.push(`    await c.run('노출', async () => { await expect(target).toBeVisible(); }, { gate: true });`);
+  }
+  if (f.moving) {
+    // 저절로 흐르는 요소: 움직이는지, (분석 때 그랬다면) 마우스를 올리면 멈추는지
+    out.push(`    const xAt = async () => (await target.boundingBox())?.x ?? 0;`);
+    out.push(`    await c.run('움직임: 저절로 흐름', async () => { const a = await xAt(); await expect.poll(async () => Math.abs((await xAt()) - a), { message: '요소가 움직이지 않음' }).toBeGreaterThan(2); });`);
+    if (f.pauseOnHover) {
+      out.push(`    await c.run('움직임: 마우스를 올리면 멈춤', async () => { await target.hover({ force: true }); await page.waitForTimeout(300); const a = await xAt(); await page.waitForTimeout(800); expect(Math.abs((await xAt()) - a), '마우스를 올려도 계속 움직임').toBeLessThan(3); await page.mouse.move(0, 0); });`);
+    }
+  }
+  if (f.locator.unnamed) out.push(`    c.soft('접근성: 화면 낭독기용 이름 있음', false, '이름(aria-label · 대체 텍스트)이 없는 아이콘 — 화면 낭독기 사용자는 용도를 알 수 없고, 테스트는 화면 구조 경로로 찾음');`);
   // 요소 안 문구는 줄마다 따로 확인 (버튼 문구 / 말풍선 문구 / 배너 제목·설명이 각각 결과로 보이도록)
   for (const l of f.lines || []) {
     out.push(`    await c.run(${JSON.stringify(`문구: "${q(l, 40)}"${hasNumber(l) ? ' (숫자는 형식만 확인)' : ''}`)}, async () => { await expect(target).toContainText(${textPattern(l, false)}); });`);
@@ -1609,7 +1814,7 @@ function elementTest(f, no, typos) {
     out.push(`      await target.hover();`);
     out.push(`      const link = page.getByRole('link', { name: ${JSON.stringify(l.name)}, exact: true }).filter({ visible: true }).first();`);
     if (l.blank) {
-      out.push(`      const popupPromise = page.waitForEvent('popup');`);
+      out.push(`      const popupPromise = page.context().waitForEvent('page');`);
       out.push(`      await link.click();`);
       out.push(`      const popup = await popupPromise;`);
       out.push(`      await expect(popup).toHaveURL(${urlMatcher(l.href, true)});`);
@@ -1694,7 +1899,8 @@ function elementTest(f, no, typos) {
   } else {
     const { action, body } = actionCode(f);
     out.push(`    await c.run(${JSON.stringify(`동작: ${action}`)}, async () => {`);
-    body.forEach((l) => out.push(`      ${l}`));
+    // 움직이는 요소: 마우스를 올린 뒤 바로 누른다 (멈추길 기다리면 시간 초과)
+    body.forEach((l) => out.push(`      ${f.moving ? l.replace('await target.click();', 'await target.hover({ force: true }); await target.click({ force: true });') : l}`));
     out.push(`    });`);
     // 흐름: 목록 대표 링크 → 상세 페이지 → 뒤로가기 → 목록으로 돌아오는지
     if (f.repeatCount && f.type === 'navigate' && new URL(f.url).origin === BASE_URL) {
@@ -1796,6 +2002,42 @@ function rollingTest(g, no, typos) {
  * 클릭 요소(노출·문구·동작) / 일반 문구·이미지 묶음 / 롤링 배너 케이스를 나열한다.
  */
 /** 페이지 단위 점검 케이스: 로드 · 네트워크 · 성능 · 임베드 / 모바일 / 접근성 / 404 / 공통 메뉴 */
+// 언어 고유 글자: 다른 언어 화면에 이 글자가 남아 있으면 번역 누락 의심
+const LANG_SCRIPT = { ko: /[가-힣]/, ja: /[ぁ-ゟ゠-ヿ]/, th: /[฀-๿]/ };
+
+/** 다국어(XLT) 한 언어: 그 언어로 열었을 때 치환 · 번역 상태 */
+function xltTest(page, loc) {
+  const out = [];
+  const baseLang = LOCALE.split('-')[0];
+  const lang = loc.split('-')[0];
+  out.push(``);
+  out.push(`  test(${JSON.stringify(`00-5. 다국어 (${loc})`)}, async ({ browser }) => {`);
+  // 로그인 상태로 실행 중이면 다른 언어 화면도 같은 로그인으로 연다
+  out.push(`    const ctx = await browser.newContext({ locale: ${JSON.stringify(loc)}, viewport: { width: ${VIEWPORT.width}, height: ${VIEWPORT.height} }, ...(process.env.QA_STORAGE_STATE ? { storageState: process.env.QA_STORAGE_STATE } : {}) });`);
+  out.push(`    const p = await ctx.newPage();`);
+  out.push(`    const { response } = await openPage(p, TARGET_URL);`);
+  out.push(`    const c = checks();`);
+  out.push(`    await c.run(${JSON.stringify(`${loc}: HTTP 응답 정상`)}, async () => { expect(response?.status() ?? 0).toBeLessThan(400); });`);
+  out.push(`    const notice = await errorScreenText(p);`);
+  out.push(`    c.soft(${JSON.stringify(`${loc}: 서비스 화면 (안내 화면 아님)`)}, !notice, '안내 화면이 열림: ' + notice + ' — 이 언어를 지원하지 않는 기획이면 정상');`);
+  out.push(`    await c.run(${JSON.stringify(`${loc}: 문구 치환 누락 없음 ({{변수}} · 번역 키)`)}, async () => { expect(await textIssues(p), '변수 · 번역 키가 그대로 보이는 문구').toEqual([]); });`);
+  out.push(`    const body = await p.locator('body').innerText();`);
+  if (LANG_SCRIPT[baseLang] && lang !== baseLang) {
+    out.push(`    const left = body.split('\\n').map((t) => t.trim()).filter((t) => ${LANG_SCRIPT[baseLang].toString()}.test(t));`);
+    out.push(`    c.soft(${JSON.stringify(`${loc}: 기본 언어(${LOCALE}) 문구가 남아 있지 않음 (번역 누락)`)}, left.length === 0, left.length + '줄 · 예: ' + left.slice(0, 3).join(' / '));`);
+  }
+  // 분석 때(기본 언어) 핵심 문구가 그대로 있으면 번역이 적용되지 않은 것
+  const keys = (page.keyTexts || []).filter((t) => !hasNumber(t)).slice(0, 5);
+  if (keys.length) {
+    out.push(`    const same = ${JSON.stringify(keys)}.filter((t) => body.includes(t));`);
+    out.push(`    c.soft(${JSON.stringify(`${loc}: 핵심 문구가 번역됨`)}, same.length < ${keys.length}, '기본 언어 문구가 그대로: ' + same.slice(0, 3).join(' / '));`);
+  }
+  out.push(`    await ctx.close();`);
+  out.push(`    c.done();`);
+  out.push(`  });`);
+  return out;
+}
+
 function pageLevelTests(page, { isStart, commonFeatures }) {
   const out = [];
   out.push(``);
@@ -1823,6 +2065,14 @@ function pageLevelTests(page, { isStart, commonFeatures }) {
   out.push(`    await c.run('JS 런타임 오류 없음', async () => { expect(errors).toEqual([]); });`);
   // 화면에 안 보이는 API · 리소스 실패도 잡는다 (같은 사이트의 404 · 5xx · 연결 실패)
   out.push(`    await c.run('네트워크 요청 실패 없음 (같은 사이트 404 · 5xx)', async () => { expect([...new Set(network)], \`실패한 요청: \${[...new Set(network)].slice(0, 3).join(' / ')}\`).toEqual([]); });`);
+  // 화면 문구 이상: 치환 안 된 변수({{token}}) · 번역 키 그대로 노출 · undefined/NaN
+  out.push(`    await c.run('문구 치환 누락 없음 ({{변수}} · 번역 키 · undefined/NaN)', async () => { expect(await textIssues(page), '변수 · 번역 키가 그대로 보이는 문구').toEqual([]); });`);
+  // 안내 화면: 분석 때 이미 안내 화면이었으면(기획상 맞을 수 있음) 그 화면이 유지되는지, 아니었으면 안내 화면으로 바뀌지 않았는지
+  if (page.errorScreen) {
+    out.push(`    await c.run(${JSON.stringify(`안내 화면 유지: "${q(page.errorScreen, 40)}" (분석 때 ${LOCALE} 에서 열린 화면)`)}, async () => { expect(await errorScreenText(page), '분석 때와 다른 화면이 열림').toBeTruthy(); });`);
+  } else {
+    out.push(`    await c.run('오류 · 이용 불가 안내 화면이 아님', async () => { const t = await errorScreenText(page); expect(t, '안내 화면이 열림: ' + t).toBeNull(); });`);
+  }
   if (page.iframes && page.iframes.length) {
     out.push(`    await c.run(${JSON.stringify(`임베드(iframe) ${page.iframes.length}개 정상 로드`)}, async () => {`);
     out.push(`      const bad = page.frames().filter((f) => f !== page.mainFrame() && /^chrome-error:/.test(f.url())).map((f) => f.url() || f.name());`);
@@ -1874,6 +2124,9 @@ function pageLevelTests(page, { isStart, commonFeatures }) {
     out.push(`    c.done();`);
     out.push(`  });`);
   }
+
+  // 다국어(XLT): 다른 언어로 같은 화면을 열어 번역 · 치환 상태를 확인. 언어별 지원 여부는 기획에 따라 다르므로 안내 화면은 경고로만 남긴다
+  for (const loc of XLT_LOCALES.filter((l) => l !== LOCALE)) out.push(...xltTest(page, loc));
 
   // 세부 페이지: 시작 페이지에서 확인한 헤더 · 메뉴 · 푸터가 이 페이지에도 보이는지 (노출만)
   if (!isStart && commonFeatures && commonFeatures.length) {
@@ -1986,14 +2239,19 @@ function slugOf(pagePath) {
   // Headless Shell 을 따로 포함하지 않으므로 전체 Chromium 으로 백그라운드 실행
   const browser = await chromium.launch({ headless: true, channel: 'chromium' });
   // 생성된 테스트와 같은 시작 상태(로그인 상태 파일만 있는 새 브라우저)로 만든다
-  const newContext = () =>
-    browser.newContext({
+  // 로그인 상태 파일의 sessionStorage(Playwright 기본 저장에는 없음)는 페이지 스크립트보다 먼저 넣는다
+  const savedSession = STORAGE_STATE ? JSON.parse(fs.readFileSync(STORAGE_STATE, 'utf-8')).sessionStorage || [] : [];
+  const newContext = async () => {
+    const ctx = await browser.newContext({
       viewport: VIEWPORT,
       locale: LOCALE,
       timezoneId: TIMEZONE,
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       ...(STORAGE_STATE ? { storageState: STORAGE_STATE } : {}),
     });
+    if (savedSession.length) await ctx.addInitScript(restoreSessionStorage, savedSession);
+    return ctx;
+  };
   if (CACHE_FILE) {
     try {
       analysisCache = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8'));
@@ -2117,7 +2375,7 @@ function slugOf(pagePath) {
     if (denom && rate < 70) warnings.push(`동작 확인률 ${rate}% (70% 미만)`);
     return { ...c, action, errorOnly, displayOnly, rate, warnings };
   };
-  const pages = all.map(({ path: p, url, title, status, blocked, keyTexts, texts, images, rolling, tables, iframes, dataActions, pageType, features, skipped, errors, shot, cached }, i) => {
+  const pages = all.map(({ path: p, url, title, status, blocked, errorScreen, keyTexts, texts, images, rolling, tables, iframes, dataActions, pageType, features, skipped, errors, shot, cached }, i) => {
     const screenshot = shot ? `screens/${pid(i + 1)}.jpg` : null;
     if (shot) fs.writeFileSync(path.join(OUTPUT_DIR, screenshot), shot);
     return {
@@ -2131,6 +2389,7 @@ function slugOf(pagePath) {
       images,
       rolling,
       blocked: blocked || null,
+      errorScreen: errorScreen || null,
       pageType,
       tables,
       screenshot,
@@ -2172,6 +2431,8 @@ function slugOf(pagePath) {
     pages,
     coverage,
     typos: typoList,
+    // 결과를 볼 때 알아야 할 점 (안내 화면만 열린 페이지 등)
+    notices: pages.filter((p) => p.errorScreen).map((p) => `${p.path}: 안내 화면 "${p.errorScreen}" 이(가) 열려 이 화면 기준으로만 테스트했습니다 (언어 ${LOCALE}). 기획상 맞는 화면이면 정상이며, 다른 언어 · 지역 · 로그인 조건으로 실행하면 실제 기능을 테스트할 수 있습니다.`),
   };
   fs.writeFileSync(path.join(OUTPUT_DIR, 'analysis.json'), JSON.stringify(analysis, null, 2), 'utf-8');
 

@@ -22,3 +22,9 @@ node_modules/
 /*.pdf
 # 다른 도구가 만든 개인 설명 문서
 /docs/QA자동화_및_QA_Automation_KC_동작설명.pdf
+
+# 개발 모드에서 프로젝트 폴더에 생기는 로컬 데이터 (분석 캐시 · 사이트별 설정 · 암호화된 비밀값 · 승인된 기준선)
+/cache/
+/projects/
+/secrets/
+/baselines/
