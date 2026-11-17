@@ -1,0 +1,36 @@
+{
+  "name": "글 등록 → 목록 → 상세",
+  "description": "글을 등록하면 안내가 나오고, 목록 맨 위에 한 건 늘어 보이며, 상세 화면에 쓴 내용이 그대로 보인다.",
+  "startUrl": "/board",
+  "variables": {
+    "title": "QA 글 {{unique}}",
+    "body": "자동 시나리오 본문 {{today}}"
+  },
+  "steps": [
+    { "name": "등록 전 글 수 기억", "action": "read", "target": { "css": "#posts li" }, "what": "count", "as": "before" },
+    {
+      "action": "click", "target": { "role": "link", "name": "글쓰기" },
+      "expect": [{ "url": "/board/new" }, { "visible": { "label": "제목" } }]
+    },
+    { "action": "fill", "target": { "label": "제목" }, "value": "{{title}}" },
+    { "action": "fill", "target": { "label": "내용" }, "value": "{{body}}" },
+    {
+      "action": "click", "target": { "role": "button", "name": "등록" },
+      "expect": [
+        { "url": "/board" },
+        { "text": "등록되었습니다" },
+        { "count": { "target": { "css": "#posts li" }, "delta": { "from": "before", "by": 1 } } },
+        { "text": "{{title}}", "in": { "css": "#posts li" } }
+      ]
+    },
+    {
+      "action": "click", "target": { "role": "link", "name": "{{title}}" },
+      "expect": [{ "text": "{{body}}" }, { "visible": { "role": "heading", "name": "{{title}}" } }]
+    }
+  ],
+  "cleanup": [
+    { "action": "goto", "url": "/board" },
+    { "action": "click", "target": { "role": "link", "name": "{{title}}" } },
+    { "action": "click", "target": { "role": "button", "name": "삭제" } }
+  ]
+}

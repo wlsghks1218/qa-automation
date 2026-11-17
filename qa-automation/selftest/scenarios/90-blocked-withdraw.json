@@ -1,0 +1,8 @@
+{
+  "name": "안전 규칙 확인: 회원 탈퇴는 실행하지 않음",
+  "description": "되돌릴 수 없는 동작(탈퇴)을 누르는 시나리오는 allowIrreversible 없이는 실행하지 않아야 한다. 자가 검증이 '실행 안 함'으로 나오는지 확인한다.",
+  "startUrl": "/board",
+  "steps": [
+    { "action": "click", "target": { "role": "button", "name": "회원 탈퇴" } }
+  ]
+}

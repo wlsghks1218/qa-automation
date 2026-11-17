@@ -417,6 +417,11 @@
         <div class="login-row"><span class="login-state saved" id="baselineState"></span><button class="ghost small" type="button" id="baselineClear">기준 해제</button></div>
         <label class="login-use"><input type="checkbox" id="baselineRun"> <b>승인된 기준으로 테스트</b> <span class="hint">· 분석 없이 승인된 기준의 테스트를 그대로 실행합니다 (기대 결과 = 사람이 승인한 동작). 새로 분석하면 기준과 달라진 점을 보여줍니다.</span></label>
       </div>
+      <div style="margin-bottom:10px">
+        <div class="login-row"><span class="login-state" id="scenarioState">URL을 입력하면 이 사이트의 시나리오를 확인합니다</span><button class="ghost small" type="button" id="scenarioOpen" disabled>시나리오 폴더 열기</button></div>
+        <p class="hint" style="margin:4px 0 0">시나리오: 가입 → 등록 → 목록 확인처럼 여러 화면을 이어 가는 흐름을 JSON 으로 적어 이 폴더에 두면, 실행할 때 단계마다 기대 결과를 확인합니다. 데이터를 바꾸므로 테스트 서버(dev · stg · qa · beta 등)에서만 실행합니다.</p>
+        <ul class="typos" id="scenarioErrors" hidden></ul>
+      </div>
       <label class="login-use" style="margin-top:0"><input type="checkbox" id="clickAll"> <b>전체 동작 확인</b> <span class="hint">· 저장·등록·제출·출근·삭제 버튼까지 실제로 눌러 확인합니다. 실제 데이터가 바뀌므로 테스트 계정·테스트 서버에서만 켜주세요. 탈퇴·결제·송금·로그아웃은 항상 누르지 않습니다.</span></label>
     </div>
 
@@ -719,6 +724,34 @@
   });
   document.querySelectorAll('input[name=scope]').forEach((r) => r.addEventListener('change', refreshBaseline));
 
+  // 시나리오: 입력한 사이트의 시나리오 폴더에 있는 JSON 개수 · 형식 오류 · 운영 서버 여부
+  async function refreshScenarios() {
+    const url = validUrl();
+    $('scenarioOpen').disabled = !url;
+    $('scenarioErrors').hidden = true;
+    if (!url) return ($('scenarioState').textContent = 'URL을 입력하면 이 사이트의 시나리오를 확인합니다');
+    const info = await fetch(`/api/scenarios?url=${encodeURIComponent(url)}`).then((r) => r.json()).catch(() => null);
+    if (!info || info.error || url !== validUrl()) return;
+    const bad = info.items.filter((it) => it.errors.length);
+    const n = info.items.length;
+    $('scenarioState').textContent = !n
+      ? '이 사이트의 시나리오 없음'
+      : `시나리오 ${n}개${bad.length ? ` · 형식 오류 ${bad.length}개` : ''}${info.env === 'production' ? ' · 운영 서버로 보여 실행하지 않습니다' : ''}`;
+    $('scenarioState').classList.toggle('saved', n > 0 && !bad.length && info.env !== 'production');
+    if (bad.length) {
+      $('scenarioErrors').innerHTML = bad.map((it) => `<li>${esc(it.file)} <span class="why">- ${esc(it.errors.slice(0, 3).join(' / '))}</span></li>`).join('');
+      $('scenarioErrors').hidden = false;
+    }
+    if (n) $('optionalGroup').open = true;
+  }
+  $('scenarioOpen').addEventListener('click', async () => {
+    const url = validUrl();
+    if (!url) return;
+    await fetch('/api/scenarios/open', { method: 'POST', body: JSON.stringify({ url }) });
+    setTimeout(refreshScenarios, 1500);
+  });
+  $('optionalGroup').addEventListener('toggle', () => $('optionalGroup').open && refreshScenarios());
+
   // 프로젝트: 이 사이트를 전에 실행했으면 그때 설정(범위 · 브라우저)으로 채운다.
   // 전체 동작 확인은 데이터가 바뀌는 설정이라 자동으로 켜지 않는다
   let projectHost = null;
@@ -747,6 +780,7 @@
     clearTimeout(window.__baselineTimer);
     window.__baselineTimer = setTimeout(() => {
       refreshBaseline();
+      refreshScenarios();
       if (validUrl()) loadProject(validUrl());
     }, 500);
     clearTimeout(checkTimer);
@@ -1124,6 +1158,32 @@
       </section>`;
   }
 
+  // 시나리오(사용자 흐름) 결과: 시나리오마다 결과 · 멈춘 단계 · 제외 이유
+  function renderScenarios(sc) {
+    if (!sc || !sc.items || !sc.items.length) return '';
+    const s = sc.summary || {};
+    const rows = sc.items
+      .map((it) => {
+        const ex = it.execution;
+        const key = it.status !== 'ready' ? 'skipped' : ex ? ex.status : 'none';
+        const label = it.status === 'invalid' ? '형식 오류' : it.status === 'blocked' ? '실행 안 함' : RESULT_LABEL[key];
+        const note = it.status !== 'ready'
+          ? `<div class="cell-note">${esc(it.reason)}</div>`
+          : ex && ex.status !== 'passed' && ex.error ? `${ex.failedAt ? `<div class="cell-note">멈춘 곳: ${esc(ex.failedAt)}</div>` : ''}<pre class="err">${esc(ex.error)}</pre>` : '';
+        const per = ex && ex.byBrowser && Object.keys(ex.byBrowser).length > 1
+          ? `<span class="bdots">${Object.entries(ex.byBrowser).map(([b, st]) => `<span class="bdot ${st}">${esc(b)}</span>`).join('')}</span>`
+          : '';
+        return `<tr><td>${esc(it.id)}</td><td><b>${esc(it.name)}</b><div class="hint">${esc(it.file)}</div></td><td>${(it.checks || []).filter((c) => /^\d+\./.test(c.name)).length || '-'}</td><td style="min-width:200px"><span class="badge ${key}">${label}</span>${per}${note}</td></tr>`;
+      })
+      .join('');
+    return `
+      <section class="card">
+        <div class="section-title"><h2>시나리오 (사용자 흐름)</h2><span class="meta">${sc.items.length}개 · 통과 ${s.passed || 0} · 실패 ${s.failed || 0}${s.blocked ? ` · 실행 안 함 ${s.blocked}` : ''}${s.invalid ? ` · 형식 오류 ${s.invalid}` : ''}</span></div>
+        <p class="hint" style="margin:0 0 8px">단계별 결과는 "케이스 보기"의 시나리오 항목에 있습니다. 동작이 실패한 단계 뒤는 실행하지 않습니다.</p>
+        <div class="tc-wrap"><table class="tc"><thead><tr><th>ID</th><th>시나리오</th><th>단계</th><th>결과</th></tr></thead><tbody>${rows}</tbody></table></div>
+      </section>`;
+  }
+
   const SEVERITY_ORDER = { High: 0, Medium: 1, Low: 2 };
 
   function renderFindings(findings) {
@@ -1158,6 +1218,7 @@
       ${errors}
       ${(r.notices || []).map((n) => `<div class="notice warn show">ℹ️ ${esc(n)}</div>`).join("")}
       ${r.tests ? renderTests(r.tests, r.reportUrl) : ''}
+      ${renderScenarios(r.scenarios)}
       ${renderCoverage(r.coverage, r.coveragePages)}
       ${renderChanges(r.changes)}
       ${renderDataActions(r.dataActions)}

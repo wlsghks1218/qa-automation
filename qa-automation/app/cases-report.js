@@ -208,6 +208,33 @@ function rowsFromDocTcs(groupLabel, doc) {
   });
 }
 
+/**
+ * 시나리오 → 단계 · 확인마다 한 행. 실행하지 않은 시나리오(안전 규칙 · 형식 오류)는 이유와 함께 한 행.
+ * 단계 이름 · 과정 · 기대결과는 생성 때 만든 checks 를, 결과는 실행 결과(group 의 같은 제목 테스트)를 쓴다.
+ */
+function rowsFromScenarios(scenarios, group) {
+  const rows = [];
+  for (const it of scenarios.items || []) {
+    const big = `시나리오\n${it.file}`;
+    const base = { big, middle: it.title, caseKey: `${big}\n${it.title}` };
+    if (it.status !== 'ready') {
+      const why = it.status === 'invalid' ? `형식 오류: ${it.reason}` : it.reason;
+      rows.push({ ...base, small: '-', step: '', expected: '', status: 'skipped', reason: why });
+      continue;
+    }
+    const runs = group ? group.tests.filter((t) => t.title === it.title) : [];
+    const merged = mergePlanned({ title: it.title, checks: it.checks.map((c) => ({ name: c.name, kind: c.kind === 'soft' ? 'soft' : 'run' })) }, runs);
+    const multi = merged.browsers.length > 1;
+    const meta = new Map(it.checks.map((c) => [c.name, c]));
+    for (const c of merged.checks) {
+      const d = meta.get(c.name) || { small: c.name, step: '', expected: '' };
+      const where = multi && c.failedIn && c.failedIn.length ? `[${c.failedIn.join(', ')}] ` : '';
+      rows.push({ ...base, small: d.small, step: d.step, expected: d.expected, status: c.status, reason: c.status === 'passed' ? '' : `${where}${c.detail || ''}` });
+    }
+  }
+  return rows;
+}
+
 // ─────────────────────────────────────────────────────────────
 // HTML
 // ─────────────────────────────────────────────────────────────
@@ -242,6 +269,13 @@ function buildCasesHtml({ plan, result = {}, screensBase = 'screens' }) {
   for (const [label, doc] of docGroups) {
     rows.push(...rowsFromDocTcs(`${label}${doc.documentTitle ? `\n${doc.documentTitle}` : ''}`, doc));
     for (const title of resultGroups.keys()) if (title.startsWith(`[${label}]`)) used.add(title);
+  }
+
+  // 2-1) 시나리오 (사용자 흐름)
+  if (result.scenarios && result.scenarios.items && result.scenarios.items.length) {
+    const title = [...resultGroups.keys()].find((t) => t.startsWith('[시나리오]'));
+    rows.push(...rowsFromScenarios(result.scenarios, title ? resultGroups.get(title) : null));
+    if (title) used.add(title);
   }
 
   // 3) 그 외 결과 그룹 (목록에 없는 테스트)

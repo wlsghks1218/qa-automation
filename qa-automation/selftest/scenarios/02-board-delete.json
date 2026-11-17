@@ -1,0 +1,20 @@
+{
+  "name": "글 삭제 → 목록에서 사라짐",
+  "description": "등록한 글을 상세 화면에서 삭제하면 안내가 나오고 목록에서 사라진다.",
+  "startUrl": "/board/new",
+  "variables": { "title": "삭제용 {{unique}}" },
+  "steps": [
+    { "action": "fill", "target": { "label": "제목" }, "value": "{{title}}" },
+    { "action": "fill", "target": { "label": "내용" }, "value": "지울 글" },
+    { "action": "click", "target": { "role": "button", "name": "등록" }, "expect": { "url": "/board" } },
+    { "action": "click", "target": { "role": "link", "name": "{{title}}" } },
+    {
+      "action": "click", "target": { "role": "button", "name": "삭제" },
+      "expect": [
+        { "url": "/board" },
+        { "hidden": { "role": "link", "name": "{{title}}" } },
+        { "text": "삭제되었습니다" }
+      ]
+    }
+  ]
+}

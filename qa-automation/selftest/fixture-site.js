@@ -110,15 +110,90 @@ function form() {
   );
 }
 
+// ─────────────────────────────────────────────────────────────
+// 시나리오(사용자 흐름) 확인용 게시판: 글쓰기 → 목록 → 상세 → 삭제.
+// 메뉴에 연결하지 않아 요소 분석(크롤러)에는 나타나지 않고, selftest/scenarios 의 시나리오로만 쓴다.
+// 버그 모드: 등록 완료 안내 없음 · 새 글이 목록 맨 아래 · 본문이 저장되지 않음 · 삭제해도 남음 (D21~D24)
+// ─────────────────────────────────────────────────────────────
+// 글이 하나는 있어야 '새 글이 맨 위' 를 확인할 수 있다
+const seedPosts = () => [{ id: 1, title: '게시판을 열었습니다', body: '첫 글' }];
+let posts = seedPosts();
+let nextId = 2;
+const escHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+
+function board(query) {
+  const created = query.get('created');
+  const ordered = M([...posts], [...posts].reverse()); // 정상: 새 글이 맨 위
+  const notice = created ? M('', '<p role="status">등록되었습니다</p>') : query.get('deleted') ? '<p role="status">삭제되었습니다</p>' : '';
+  return shell(
+    '게시판',
+    'board',
+    `<h1>게시판</h1>${notice}<p>전체 글 <span id="cnt">${posts.length}</span>건</p>
+<a href="/board/new">글쓰기</a>
+<ul id="posts">${ordered.map((p) => `<li><a href="/board/${p.id}">${escHtml(p.title)}</a></li>`).join('')}</ul>`
+  );
+}
+
+const boardForm = () =>
+  shell(
+    '글쓰기',
+    'board',
+    `<h1>글쓰기</h1><form method="post" action="/board/new">
+<label>제목 <input name="title" required></label>
+<label>내용 <textarea name="body"></textarea></label>
+<button type="submit">등록</button></form>`
+  );
+
+const boardItem = (p) =>
+  shell(
+    escHtml(p.title),
+    'board',
+    `<h1>${escHtml(p.title)}</h1><p class="body">${escHtml(p.body)}</p>
+<form method="post" action="/board/${p.id}/delete"><button type="submit">삭제</button></form>
+<a href="/board">목록으로</a>`
+  );
+
+const readForm = (req) =>
+  new Promise((resolve) => {
+    let raw = '';
+    req.on('data', (d) => (raw += d));
+    req.on('end', () => resolve(new URLSearchParams(raw)));
+  });
+
 http
-  .createServer((req, res) => {
+  .createServer(async (req, res) => {
     const u = req.url.split('?')[0];
+    const query = new URLSearchParams(req.url.split('?')[1] || '');
     const send = (code, body, type = 'text/html; charset=utf-8') => {
       res.writeHead(code, { 'Content-Type': type });
       res.end(body);
     };
-    if (u === '/__mode/mutated') return (mutated = true), send(200, 'mutated');
-    if (u === '/__mode/clean') return (mutated = false), send(200, 'clean');
+    const redirect = (to) => {
+      res.writeHead(303, { Location: to });
+      res.end();
+    };
+    // 모드를 바꿀 때 게시판도 비운다 (정상 · 버그 모드 실행이 서로 영향을 주지 않도록)
+    if (u === '/__mode/mutated') return (mutated = true), (posts = seedPosts()), send(200, 'mutated');
+    if (u === '/__mode/clean') return (mutated = false), (posts = seedPosts()), send(200, 'clean');
+    if (u === '/__board') return send(200, JSON.stringify(posts), 'application/json');
+
+    if (u === '/board') return send(200, board(query));
+    if (u === '/board/new' && req.method === 'POST') {
+      const f = await readForm(req);
+      const p = { id: nextId++, title: f.get('title') || '(제목 없음)', body: M('', f.get('body') || '') };
+      posts.push(p);
+      return redirect(`/board?created=${p.id}`);
+    }
+    if (u === '/board/new') return send(200, boardForm());
+    let m;
+    if ((m = u.match(/^\/board\/(\d+)\/delete$/)) && req.method === 'POST') {
+      if (!mutated) posts = posts.filter((p) => p.id !== Number(m[1]));
+      return redirect('/board?deleted=1');
+    }
+    if ((m = u.match(/^\/board\/(\d+)$/))) {
+      const p = posts.find((x) => x.id === Number(m[1]));
+      return p ? send(200, boardItem(p)) : send(404, shell('없는 글', 'board', '<h1>없는 글입니다</h1>'));
+    }
     if (u === '/') return send(200, home());
     if (u === '/list') return send(200, list());
     if (u === '/about') return send(200, about());

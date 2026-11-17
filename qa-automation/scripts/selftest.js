@@ -16,6 +16,8 @@ const BASE = `http://127.0.0.1:${PORT}/`;
 const WS = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-kc-selftest-'));
 const REPORTS = path.join(ROOT, 'selftest', 'reports');
 const defects = require('../selftest/defects');
+const { prepareScenarios, validateScenario } = require('./lib/scenario-specs');
+const SCENARIO_DIR = path.join(ROOT, 'selftest', 'scenarios');
 const { version } = require('../app/version.json');
 
 const node = (args, env = {}) =>
@@ -72,17 +74,32 @@ const pathOfGroup = (title) => (title.match(/^\[[^\]]+\] (\S+)/) || [])[1] || ''
     await mode('clean');
     node([path.join(ROOT, 'scripts', 'generate-specs.js'), BASE, '--scope=all'], { QA_OUTPUT_DIR: path.join(WS, 'tests', 'generated') });
     const analysis = JSON.parse(fs.readFileSync(path.join(WS, 'tests', 'generated', 'analysis.json'), 'utf-8'));
+    // 시나리오(사용자 흐름): 앱과 같은 생성기로 테스트 작성 (selftest/scenarios)
+    const scenarioItems = prepareScenarios({ dir: SCENARIO_DIR, baseUrl: BASE, outDir: path.join(WS, 'tests', 'generated', 'scenario') });
 
     console.log('[2/3] 정상 모드 실행 (오탐 측정)');
     const clean = runTests('clean');
     const falsePositives = failedChecks(clean);
+    // 정리 단계가 만든 데이터를 지웠는지: 정상 모드 실행 뒤 게시판에는 처음 글 하나만 남아야 한다
+    const leftover = await fetch(`${BASE}__board`).then((r) => r.json());
+
+    // 안전 규칙: 실행하면 안 되는 시나리오가 막히는지, 잘못된 형식 · 운영 서버를 거르는지
+    const statusOf = (file) => (scenarioItems.find((it) => it.file === file) || {}).status;
+    const prodItems = prepareScenarios({ dir: SCENARIO_DIR, baseUrl: 'https://www.example.com/', outDir: path.join(WS, 'scenario-prod-check') });
+    const safety = [
+      ['되돌릴 수 없는 동작(탈퇴)이 있는 시나리오는 실행하지 않음', statusOf('90-blocked-withdraw.json') === 'blocked'],
+      ['운영 서버로 보이는 주소에서는 시나리오를 실행하지 않음', prodItems.length > 0 && prodItems.every((it) => it.status === 'blocked') && !fs.existsSync(path.join(WS, 'scenario-prod-check'))],
+      ['정의되지 않은 변수는 형식 오류', validateScenario({ name: 'x', steps: [{ action: 'fill', target: { label: 'a' }, value: '{{nope}}' }] }).length > 0],
+      ['비밀값 변수는 아직 받지 않음 (평문이 리포트에 남지 않도록)', validateScenario({ name: 'x', steps: [{ action: 'fill', target: { label: 'a' }, value: '{{secret:pw}}' }] }).length > 0],
+      ['정리 단계가 만든 데이터를 지움', leftover.length === 1],
+    ].map(([name, ok]) => ({ name, ok }));
 
     console.log('[3/3] 버그 모드 실행 (감지율 측정)');
     await mode('mutated');
     const bugged = runTests('mutated');
     const bugFails = failedChecks(bugged);
     const results = defects.map((d) => {
-      const hit = bugFails.find((f) => pathOfGroup(f.group) === d.page && f.test.includes(d.title) && d.check.test(f.check));
+      const hit = bugFails.find((f) => (d.group ? f.group === d.group : pathOfGroup(f.group) === d.page) && f.test.includes(d.title) && d.check.test(f.check));
       return { id: d.id, area: d.area, desc: d.desc, detected: !!hit, by: hit ? `${f2(hit.test)} · ${hit.check}` : null };
     });
     function f2(t) {
@@ -103,6 +120,13 @@ const pathOfGroup = (title) => (title.match(/^\[[^\]]+\] (\S+)/) || [])[1] || ''
       detectionRate: Math.round((detected / results.length) * 100),
       falsePositives: falsePositives.length,
       falsePositiveList: falsePositives,
+      scenarios: {
+        total: scenarioItems.length,
+        ready: scenarioItems.filter((it) => it.status === 'ready').length,
+        blocked: scenarioItems.filter((it) => it.status === 'blocked').length,
+        invalid: scenarioItems.filter((it) => it.status === 'invalid').map((it) => `${it.file}: ${it.reason}`),
+      },
+      safety,
       results,
     };
     fs.mkdirSync(REPORTS, { recursive: true });
@@ -113,9 +137,13 @@ const pathOfGroup = (title) => (title.match(/^\[[^\]]+\] (\S+)/) || [])[1] || ''
     console.log('\n==================================================');
     console.log(`자가 검증 결과 v${version}: 감지 ${detected}/${results.length} (${report.detectionRate}%) · 오탐 ${falsePositives.length}건 · 케이스 ${report.cases}개 · ${report.seconds}초`);
     for (const r of results) console.log(`  ${r.detected ? '✓' : '✗'} ${r.id} [${r.area}] ${r.desc}${r.detected ? '' : '  ← 감지 못함'}`);
-    for (const f of falsePositives) console.log(`  ⚠ 오탐: ${pathOfGroup(f.group)} · ${f.test} · ${f.check} — ${f.detail}`);
+    for (const f of falsePositives) console.log(`  ⚠ 오탐: ${f.group} · ${f.test} · ${f.check} — ${f.detail}`);
+    console.log(`  시나리오 ${report.scenarios.total}개 (실행 ${report.scenarios.ready} · 실행 안 함 ${report.scenarios.blocked} · 형식 오류 ${report.scenarios.invalid.length})`);
+    for (const s of safety) console.log(`  ${s.ok ? '✓' : '✗'} 안전: ${s.name}`);
+    for (const e of report.scenarios.invalid) console.log(`  ✗ 시나리오 형식 오류: ${e}`);
     console.log('==================================================');
-    process.exitCode = report.detectionRate === 100 && report.falsePositives === 0 ? 0 : 1;
+    const safe = safety.every((s) => s.ok) && !report.scenarios.invalid.length;
+    process.exitCode = report.detectionRate === 100 && report.falsePositives === 0 && safe ? 0 : 1;
   } finally {
     site.kill();
     if (!process.argv.includes('--keep')) fs.rmSync(WS, { recursive: true, force: true });

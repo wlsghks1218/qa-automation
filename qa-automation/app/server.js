@@ -22,6 +22,7 @@ const { createBaselineStore } = require('./baseline');
 // 테스트 진행률(완료/전체)을 출력하는 리포터 → 앱 프로그레스 바
 const PROGRESS_REPORTER = path.join(__dirname, 'progress-reporter.js');
 const { writeDocSpecs } = require('../scripts/lib/doc-specs');
+const { prepareScenarios, GROUP: SCENARIO_GROUP } = require('../scripts/lib/scenario-specs');
 const { name: APP_NAME, version: VERSION } = require('./version.json');
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -49,6 +50,9 @@ const baselines = createBaselineStore(path.join(USER_DIR, 'baselines'));
 // 비밀값(암호화) · 사이트별 마지막 실행 설정
 const secrets = createSecretStore(path.join(USER_DIR, 'secrets'));
 const projects = createProjectStore(path.join(USER_DIR, 'projects'));
+// 시나리오(사용자 흐름) JSON: 사이트(host)별 폴더. QA_SCENARIO_DIR 이 있으면 그 폴더만 사용 (자가 검증용)
+const SCENARIOS_ROOT = path.join(USER_DIR, 'scenarios');
+const scenarioDirOf = (url) => process.env.QA_SCENARIO_DIR || path.join(SCENARIOS_ROOT, projects.hostOf(url) || '_');
 const runDirs = new Map(); // 실행 ID → 결과 폴더 (폴더 설정을 바꿔도 이번 세션 결과 링크 유지)
 
 function saveSettings() {
@@ -467,6 +471,34 @@ function attachDocResults(doc, mappings, tests, group) {
   };
 }
 
+/** 시나리오마다 실행 결과(브라우저 중 가장 나쁜 결과) · 실패한 단계를 붙이고 집계한다 */
+function attachScenarioResults(sc, tests) {
+  const runs = tests ? tests.groups.filter((g) => g.title === SCENARIO_GROUP).flatMap((g) => g.tests) : [];
+  for (const it of sc.items) {
+    const mine = runs.filter((t) => t.title === it.title);
+    if (!mine.length) {
+      it.execution = null;
+      continue;
+    }
+    const worst = mine.reduce((a, b) => (SEVERITY.indexOf(b.status) > SEVERITY.indexOf(a.status) ? b : a));
+    const failed = worst.checks.find((c) => c.status === 'failed');
+    it.execution = {
+      status: worst.status,
+      failedAt: failed ? failed.name : null,
+      error: failed ? failed.detail : worst.error,
+      byBrowser: Object.fromEntries(mine.map((r) => [r.browser, r.status])),
+    };
+  }
+  const count = (fn) => sc.items.filter(fn).length;
+  sc.summary = {
+    total: sc.items.length,
+    passed: count((it) => it.execution && it.execution.status === 'passed'),
+    failed: count((it) => it.execution && ['failed', 'flaky'].includes(it.execution.status)),
+    blocked: count((it) => it.status === 'blocked'),
+    invalid: count((it) => it.status === 'invalid'),
+  };
+}
+
 async function runJob(config) {
   const url = config.target.url;
   // 범위 'pages' · 'changes' 는 아직 실행기가 없으므로 전체 사이트로 처리
@@ -668,8 +700,33 @@ async function runJob(config) {
         checkStop();
       }
 
-      // 4) 실행. '입력한(첨부한) 사이트(PDF)만' + 기획서면 기획서 기반 테스트만 실행
+      // 3-2) 시나리오: 이 사이트의 시나리오 폴더에 있는 사용자 흐름 JSON → 테스트 (기대값 = 사람이 쓴 값)
       const docOnly = scope === 'single' && result.doc && docSpecCount > 0;
+      if (!docOnly) {
+        const dir = scenarioDirOf(url);
+        try {
+          const items = prepareScenarios({
+            dir,
+            baseUrl: url,
+            envType: config.target.envType,
+            outDir: path.join(GENERATED_DIR, 'scenario'),
+            env: analysis.meta ? { viewport: analysis.meta.viewport, locale: analysis.meta.locale, timezone: analysis.meta.timezone } : null,
+          });
+          if (items.length) {
+            result.scenarios = { dir, items };
+            const c = (s) => items.filter((it) => it.status === s).length;
+            log(`[시나리오] ${dir}: ${items.length}개 · 실행 ${c('ready')} · 안전 규칙으로 제외 ${c('blocked')} · 형식 오류 ${c('invalid')}`);
+            for (const it of items.filter((x) => x.status !== 'ready')) log(`[시나리오] ${it.title} (${it.file}) 제외: ${it.reason}`);
+          }
+        } catch (e) {
+          result.errors.push(`시나리오 준비 실패: ${e.message}`);
+          log(`[시나리오] 실패: ${e.message}`);
+        }
+      } else {
+        fs.rmSync(path.join(GENERATED_DIR, 'scenario'), { recursive: true, force: true });
+      }
+
+      // 4) 실행. '입력한(첨부한) 사이트(PDF)만' + 기획서면 기획서 기반 테스트만 실행
       setPhase(`${docOnly ? '기획서 기반 테스트' : '생성된 테스트'} 실행 중 (${browsers.map((b) => BROWSER_LABEL[b]).join(', ')})`);
       const reportDir = path.join(runDir, 'report');
       await runNode([PLAYWRIGHT_CLI, 'test', '--config', PLAYWRIGHT_CONFIG, `--reporter=list,html,json,${PROGRESS_REPORTER}`], {
@@ -703,6 +760,7 @@ async function runJob(config) {
       fs.writeFileSync(path.join(runDir, 'doc-testcases.csv'), toCsv(result.doc), 'utf-8');
       result.docCsvUrl = `/results/${id}/doc-testcases.csv`;
     }
+    if (result.scenarios) attachScenarioResults(result.scenarios, result.tests);
     result.finishedAt = Date.now();
     if (plan || result.tests) {
       // 실행 결과를 채운 케이스 보기 페이지 (기획서·AI 테스트 결과도 같은 파일 아래쪽에 포함)
@@ -980,6 +1038,24 @@ const server = http.createServer(async (req, res) => {
         return json(res, 400, { error: e.message });
       }
       return json(res, 200, { ok: true });
+    }
+
+    // 시나리오: 이 사이트의 시나리오 폴더 위치 · 파일 목록(형식 검사 결과 포함) · 폴더 열기
+    if (pathname === '/api/scenarios' && req.method === 'GET') {
+      const target = new URL(req.url, 'http://x').searchParams.get('url') || '';
+      if (!projects.hostOf(target)) return json(res, 400, { error: '올바른 URL을 먼저 입력해주세요.' });
+      const dir = scenarioDirOf(target);
+      const { loadScenarios, envKind } = require('../scripts/lib/scenario-specs');
+      const items = loadScenarios(dir).map(({ file, scenario, errors }) => ({ file, name: (scenario && scenario.name) || file, errors }));
+      return json(res, 200, { dir, items, env: envKind(target, null) });
+    }
+    if (pathname === '/api/scenarios/open' && req.method === 'POST') {
+      const target = (await readJson(req)).url || '';
+      if (!projects.hostOf(target)) return json(res, 400, { error: '올바른 URL을 먼저 입력해주세요.' });
+      const dir = scenarioDirOf(target);
+      fs.mkdirSync(dir, { recursive: true });
+      hooks.openPath(dir);
+      return json(res, 200, { dir });
     }
 
     // 프로젝트: 이 사이트의 마지막 실행 설정 (입력 화면 자동 채우기)

@@ -375,3 +375,26 @@ export async function tableData(table: import('@playwright/test').Locator): Prom
     return { heads, rows };
   });
 }
+
+// ─────────────────────────────────────────────────────────────
+// 시나리오 (scripts/lib/scenario-specs.js 가 만든 테스트가 사용)
+// ─────────────────────────────────────────────────────────────
+
+/** 시나리오 기본 변수. unique: 실행마다 다른 값(만드는 데이터가 겹치지 않도록) · today: 오늘 날짜 · now: 지금 시각 */
+export function scenarioVars(): Record<string, string> {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, '0');
+  return {
+    unique: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`,
+    today: `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`,
+    now: `${p(d.getHours())}:${p(d.getMinutes())}`,
+  };
+}
+
+/** 시나리오의 주소 확인용 정규식. 경로까지 일치해야 하고, 쿼리는 적었을 때만 비교한다 (끝의 / · 추가 쿼리 · # 은 허용) */
+export function urlPattern(base: string, value: string): RegExp {
+  const u = new URL(value, base);
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+  const head = esc(u.origin + u.pathname.replace(/\/$/, ''));
+  return u.search ? new RegExp(`^${head}\\/?${esc(u.search)}(?:[&#].*)?$`) : new RegExp(`^${head}\\/?(?:[?#].*)?$`);
+}
