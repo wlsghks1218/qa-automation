@@ -66,13 +66,13 @@
 <body>
 
 <h1>QA_Automation_KC 동작 흐름</h1>
-<div class="sub">URL 또는 기획서를 넣으면 테스트 케이스를 자동으로 만들고 실행해서 결과를 보여주는 프로그램 · v{{VERSION}} 기준</div>
+<div class="sub">URL · 기획서 · 내 TC 파일 · 시나리오를 넣으면 테스트 케이스를 자동으로 만들고 실행해서 결과를 보여주는 프로그램 · v{{VERSION}} 기준</div>
 
 <h2>1. 한눈에 보기</h2>
 <div class="flow">
   <div class="row">
-    <div class="step in"><div class="n">STEP 1</div><div class="t">입력</div><div class="d">URL · 기획서(PDF 등) · 테스트 범위 · 브라우저 · 로그인 · 동작 확인 범위</div></div>
-    <div class="side"><b>로그인이 필요한 사이트</b><br>로그인 창에서 사람이 직접 로그인(ID/PW · SNS · 인증) → 로그인 상태를 저장해 이후 모든 단계에 사용</div>
+    <div class="step in"><div class="n">STEP 1</div><div class="t">입력</div><div class="d">[필수] URL 또는 기획서 · [권장] 로그인 · 기획서/내 TC 파일(CSV) · 범위 · 브라우저 · 화면 언어 · 다국어 · [선택] 동작 확인 범위 · 승인된 기준 · 시나리오 폴더 · 결과 폴더</div></div>
+    <div class="side"><b>로그인이 필요한 사이트</b><br>로그인 창에서 사람이 직접 로그인(ID/PW · SNS · 인증) → 로그인 상태를 암호화해 저장하고 이후 모든 단계에 사용<br><b>같은 사이트를 다시 입력</b>하면 지난 설정으로 자동 채움</div>
   </div>
   <div class="arrow-row"><div class="arrow">▼</div><div class="spacer"></div></div>
   <div class="row">
@@ -82,26 +82,26 @@
   <div class="arrow-row"><div class="arrow">▼</div><div class="spacer"></div></div>
   <div class="row">
     <div class="step core"><div class="n">STEP 3 · 하네스 generate-specs.js</div><div class="t">페이지마다 화면 분석</div><div class="d">버튼 · 링크 · 배너 · 입력창 · 검색창 · 드롭다운 · 표 · 문구 · 이미지 · 롤링 배너를 찾고, <b>실제로 눌러서</b> 무슨 일이 일어나는지 관찰</div></div>
-    <div class="side"><b>기획서를 넣은 경우</b><br>AI가 기획서로 TC를 쓰고, 그 TC를 STEP 3에서 찾은 화면 요소와 연결</div>
+    <div class="side"><b>기획서를 넣은 경우</b> AI가 기획서로 TC를 쓰고, <b>내 TC 파일을 넣은 경우</b> 그 TC를 그대로 읽어서, STEP 3에서 찾은 화면 요소와 연결 (AI Key 가 없으면 이름 · 문구 · UI 용어 규칙으로 연결)</div>
   </div>
   <div class="arrow-row"><div class="arrow">▼</div><div class="spacer"></div></div>
   <div class="row">
-    <div class="step core"><div class="n">STEP 4</div><div class="t">테스트 케이스 생성</div><div class="d">화면 위→아래 순서로 요소마다 <b>노출 · 문구 · 동작</b> 확인 항목을 만들고, 규칙 기반 오타 의심 검사 · <code>cases.html</code>(실행 전) 저장</div></div>
-    <div class="side"><b>AI 테스트 버튼</b><br>페이지 화면 캡처 + 요소 목록을 AI에게 보내 기대 동작 TC와 화면 이슈(오타 · 레이아웃 등)를 추가</div>
+    <div class="step core"><div class="n">STEP 4</div><div class="t">테스트 케이스 생성</div><div class="d">화면 위→아래 순서로 요소마다 <b>노출 · 문구 · 동작</b> 확인 항목 + 페이지마다 로드 · 모바일 · 접근성 · 다국어 점검, 규칙 기반 오타 의심 검사 · <code>cases.html</code>(실행 전) 저장</div></div>
+    <div class="side"><b>시나리오 폴더에 JSON 이 있으면</b> 사용자 흐름 테스트도 만듦 (운영 서버 · 탈퇴 · 결제는 제외)<br><b>AI 테스트 버튼</b> 화면 캡처 + 요소 목록을 AI에게 보내 기대 동작 TC와 화면 이슈를 추가</div>
   </div>
   <div class="arrow-row"><div class="arrow">▼</div><div class="spacer"></div></div>
   <div class="row">
     <div class="step run"><div class="n">STEP 5 · Playwright</div><div class="t">실행 = 실제 사이트와 비교</div><div class="d">Chrome · Safari(WebKit) · Firefox에서 새 브라우저로 사이트를 다시 열고, 분석 때 관찰한 결과대로 동작하는지 하나씩 확인 (진행률 표시 · 중지 가능)</div></div>
-    <div class="side"><b>비교 기준</b><br>① 분석 때 실제로 관찰한 동작<br>② 기획서에 적힌 기대 결과<br>③ AI가 판단한 기대 동작</div>
+    <div class="side"><b>비교 기준</b><br>① 분석 때 실제로 관찰한 동작 (또는 사람이 승인한 기준)<br>② 기획서 · 내 TC 에 적힌 기대 결과<br>③ 시나리오에 사람이 쓴 기대 결과<br>④ AI가 판단한 기대 동작</div>
   </div>
   <div class="arrow-row"><div class="arrow">▼</div><div class="spacer"></div></div>
   <div class="row">
-    <div class="step out"><div class="n">STEP 6</div><div class="t">결과</div><div class="d">앱 화면 결과 · <code>cases.html</code>(대분류 · 중분류 · 소분류 · 과정 · 기대결과 · 결과 · 이유) · Playwright 리포트(실패 스크린샷 · 영상) · <code>run.log</code></div></div>
-    <div class="side"><b>결과 폴더</b>에 실행마다 따로 저장<br>CSV(엑셀)로도 내려받기 가능</div>
+    <div class="step out"><div class="n">STEP 6</div><div class="t">결과</div><div class="d">앱 화면 결과 · <code>cases.html</code>(대분류 · 중분류 · 소분류 · 과정 · 기대결과 · 결과 · 이유) · 커버리지 · 기준 대비 변경 · 내 TC 대비 자동화 현황 · 시나리오별 결과 · Playwright 리포트(실패 스크린샷 · 영상) · <code>run.log</code></div></div>
+    <div class="side"><b>결과 폴더</b>에 실행마다 따로 저장<br>CSV(엑셀)로도 내려받기 가능<br>검토 후 <b>기준으로 승인</b>하면 다음 실행부터 그 기준과 비교</div>
   </div>
 </div>
 
-<div class="note">핵심 원리: 이 프로그램은 <b>사람이 하듯 화면을 직접 눌러 보고</b>(분석), 그때 본 결과를 <b>테스트 코드로 고정</b>한 뒤(생성), <b>새 브라우저에서 다시 해 봐서 같은 결과가 나오는지</b> 확인합니다(실행). 기획서나 AI를 쓰면 "관찰한 결과" 대신 "기대해야 하는 결과"와 비교할 수 있습니다.</div>
+<div class="note">핵심 원리: 이 프로그램은 <b>사람이 하듯 화면을 직접 눌러 보고</b>(분석), 그때 본 결과를 <b>테스트 코드로 고정</b>한 뒤(생성), <b>새 브라우저에서 다시 해 봐서 같은 결과가 나오는지</b> 확인합니다(실행). 기획서 · 내 TC · 시나리오 · AI를 쓰면 "관찰한 결과" 대신 "기대해야 하는 결과"와 비교할 수 있습니다.</div>
 
 <h2 class="page-break">2. STEP 1 · 입력</h2>
 <table>
@@ -208,6 +208,7 @@
   <tr><td class="k">오타 의심</td><td>실패가 아닌 <b>경고</b>. 사이트 전체 문구 비교(자주 쓰인 단어와 헷갈리는 자모 하나 차이) · 형식 오류(단어 반복 · 괄호 짝 · 낱자모) · 자주 틀리는 표기(되요 · 몇일 · 할께 …)</td></tr>
 </table>
 <p class="small">분석이 끝나면 결과 폴더에 <code>cases.json</code>과 <code>cases.html</code>(모든 항목 "미실행")이 먼저 저장됩니다.</p>
+<p class="small"><b>함께 만들어지는 테스트</b> — 기획서 · 내 TC 파일이 있으면 TC마다 연결된 화면 요소로 기대 결과 테스트를, 시나리오 폴더에 JSON 이 있으면 시나리오마다 단계 · 확인 항목 테스트를, 다국어를 고르면 언어마다 00-5 테스트를 같은 실행에 넣습니다.</p>
 
 <h2>6. STEP 5 · 실행 (사이트와 비교)</h2>
 <div class="mini"><span class="b">새 브라우저</span><span class="a">→</span><span class="b">(저장된 로그인 적용)</span><span class="a">→</span><span class="b">페이지 열기 · 팝업 처리</span><span class="a">→</span><span class="b">확인 항목 순서대로 실행</span><span class="a">→</span><span class="b">항목별 통과/실패 기록</span></div>
@@ -219,8 +220,9 @@
   <tr><td class="k">동작 제한 시간</td><td>클릭 · 입력 15초</td><td>한 동작이 멈추면 케이스 전체 제한 시간(60초)을 다 쓰지 않고 바로 실패로 기록</td></tr>
   <tr><td class="k">진행률</td><td>앱 화면 프로그레스 바</td><td>분석: 페이지 수 · 실행: 끝난 케이스 / 전체 (통과 초록 · 실패 빨강)</td></tr>
   <tr><td class="k">중지</td><td>중지 버튼</td><td>실행 중인 분석 · 테스트와 브라우저를 즉시 종료</td></tr>
+  <tr><td class="k">시나리오</td><td>한 번에 하나 · 재시도 없음</td><td>데이터를 바꾸는 흐름이라 동시에 돌거나 두 번 실행되면 결과가 꼬임. 동작이 실패하면 그 시나리오의 뒤 단계는 실행 안 함, 정리 단계는 항상 실행</td></tr>
 </table>
-<div class="note"><b>"사이트와 비교"의 의미</b> — 규칙 기반 테스트의 기대 결과는 <b>분석 때 실제로 관찰한 동작</b>입니다. 그래서 "지금 사이트가 분석 시점과 같은 화면 · 같은 동작인가"를 확인하는 회귀 테스트에 강합니다. "원래 이렇게 동작해야 한다"를 확인하려면 기획서(기획서의 기대 결과와 비교)나 AI 테스트를 함께 씁니다.</div>
+<div class="note"><b>"사이트와 비교"의 의미</b> — 규칙 기반 테스트의 기대 결과는 <b>분석 때 실제로 관찰한 동작</b>입니다. 그래서 "지금 사이트가 분석 시점과 같은 화면 · 같은 동작인가"를 확인하는 회귀 테스트에 강합니다. "원래 이렇게 동작해야 한다"를 확인하려면 기획서 · 내 TC(적힌 기대 결과와 비교), 시나리오(사람이 쓴 기대 결과와 비교), AI 테스트를 함께 씁니다.</div>
 
 <h2 class="page-break">7. STEP 6 · 결과</h2>
 <p>실행마다 결과 폴더(기본: 문서/QA_Automation_KC, 앱에서 변경 가능) 아래 <code>날짜-시간</code> 폴더가 만들어집니다.</p>
@@ -233,7 +235,9 @@
   <tr><td class="k">run.log</td><td>실행 전체 로그 (분석 실패 원인 확인용)</td></tr>
   <tr><td class="k">changes.json</td><td><b>기준 대비 변경</b>: 승인된 기준(없으면 직전 실행)과 비교한 페이지 추가/사라짐 · 요소 추가/사라짐 · 동작 변경 · 문구 추가/사라짐 (앱 화면 · cases.html 에도 표시)</td></tr>
   <tr><td class="k">커버리지</td><td>페이지마다 찾은 클릭 요소 중 <b>동작 확인 · 노출·문구만 · 식별 불가(미확인) · 다른 곳에서 확인</b> 개수와 동작 확인률. 식별 불가가 있거나 확인률 70% 미만이면 경고 (analysis.json · 앱 화면 · cases.html)</td></tr>
-  <tr><td class="k">doc-testcases.* · ai-testcases.*</td><td>기획서 · AI 테스트를 사용한 경우의 TC와 결과</td></tr>
+  <tr><td class="k">doc-testcases.* · ai-testcases.*</td><td>기획서 · 내 TC 파일 · AI 테스트를 사용한 경우의 TC와 결과 (내 TC 는 "내 TC 대비 자동화 현황": 자동 실행 · 화면에서 못 찾음 · 조건 필요 · 통과 · 실패)</td></tr>
+  <tr><td class="k">시나리오 결과</td><td>앱 화면 "시나리오 (사용자 흐름)" · cases.html 대분류 "[시나리오] 사용자 흐름": 시나리오별 통과 · 실패 · 실행 안 함 · 형식 오류, 실패하면 멈춘 단계와 오류</td></tr>
+  <tr><td class="k">run-config.json</td><td>이번 실행의 설정 (범위 · 브라우저 · 언어 등). 비밀값은 id 만, 기획서는 파일 이름만 기록</td></tr>
 </table>
 
 <h3>결과 읽는 법</h3>
