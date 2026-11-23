@@ -474,6 +474,15 @@
     <h2>AI 설정</h2>
     <p class="hint">기획서 분석과 TC 매핑에 사용할 AI를 선택하세요. API Key는 이 PC에만 저장됩니다.</p>
     <div class="provider-list" id="providerList"></div>
+    <div id="aiBaseRow" hidden>
+      <label class="label" for="aiBaseUrl" style="margin-top:16px">서버 주소 <span class="hint">· Ollama · vLLM · LM Studio 등 OpenAI 호환 주소 (끝이 /v1)</span></label>
+      <div class="login-row">
+        <input class="url-input" id="aiBaseUrl" type="url" autocomplete="off" spellcheck="false" style="flex:1">
+        <button class="ghost small" type="button" id="aiCheck">연결 확인</button>
+      </div>
+      <p class="hint" id="aiCheckState" style="margin:6px 0 0"></p>
+      <p class="hint" style="margin:6px 0 0">기획서 · 화면 캡처가 이 서버로만 전송되고 외부 AI 로는 나가지 않습니다. 이미지(화면 캡처)를 읽으려면 Gemma 3 처럼 이미지를 읽는 모델이어야 합니다.</p>
+    </div>
     <label class="label" for="aiKey" style="margin-top:16px">API Key <span class="hint" id="aiKeyState"></span></label>
     <input class="url-input" id="aiKey" type="password" autocomplete="off" spellcheck="false">
     <a class="hint" id="aiKeyLink" href="#" target="_blank">API Key 발급 페이지 열기</a>
@@ -566,7 +575,8 @@
   function applyLlm(next) {
     llm = next;
     const current = llm.providers.find((p) => p.id === llm.provider);
-    hasApiKey = current.hasKey;
+    // 사내 LLM 은 키 대신 서버 주소로 연결 (주소를 비우면 기본 주소)
+    hasApiKey = current.local ? true : current.hasKey;
     $('llmLabel').textContent = current.label.split(' ')[0];
     $('keyNoticeProvider').textContent = current.label;
     refreshForm();
@@ -587,9 +597,14 @@
   function selectProvider(id) {
     const p = llm.providers.find((x) => x.id === id);
     $('aiKey').value = '';
-    $('aiKey').placeholder = p.hasKey ? '저장된 키 사용 중 · 바꾸려면 새 키 입력' : `${p.label} API Key 입력`;
-    $('aiKeyState').textContent = p.hasKey ? '· 저장됨' : '· 미입력';
-    $('aiKeyLink').href = p.keyUrl;
+    $('aiKey').placeholder = p.hasKey ? '저장된 키 사용 중 · 바꾸려면 새 키 입력' : p.local ? '서버가 키를 요구할 때만 입력' : `${p.label} API Key 입력`;
+    $('aiKeyState').textContent = p.hasKey ? '· 저장됨' : p.local ? '· 선택 (대부분 필요 없음)' : '· 미입력';
+    $('aiKeyLink').hidden = !p.keyUrl;
+    if (p.keyUrl) $('aiKeyLink').href = p.keyUrl;
+    $('aiBaseRow').hidden = !p.local;
+    $('aiBaseUrl').value = p.local ? p.baseUrl || '' : '';
+    $('aiBaseUrl').placeholder = p.local ? `기본값: ${p.defaultBaseUrl}` : '';
+    $('aiCheckState').textContent = '';
     $('aiModel').value = p.model;
     $('aiModel').placeholder = `기본값: ${p.defaultModel}`;
   }
@@ -601,7 +616,7 @@
           <input type="radio" name="provider" value="${p.id}" ${p.id === llm.provider ? 'checked' : ''}>
           <b>${esc(p.label.split(' ')[0])}</b>
           <span class="hint">${esc(p.label.split(' ').slice(1).join(' '))}</span>
-          <span class="k ${p.hasKey ? 'ok' : ''}">${p.hasKey ? '키 저장됨' : '키 없음'}</span>
+          <span class="k ${p.hasKey || p.local ? 'ok' : ''}">${p.local ? '사내 서버' : p.hasKey ? '키 저장됨' : '키 없음'}</span>
         </label>`)
       .join('');
     document.querySelectorAll('input[name=provider]').forEach((r) => r.addEventListener('change', () => selectProvider(r.value)));
@@ -612,7 +627,19 @@
   $('aiDialog').addEventListener('close', () => {
     if ($('aiDialog').returnValue !== 'save') return;
     const provider = document.querySelector('input[name=provider]:checked').value;
-    saveLlm({ provider, apiKey: $('aiKey').value.trim(), model: $('aiModel').value.trim() });
+    const p = llm.providers.find((x) => x.id === provider);
+    saveLlm({ provider, apiKey: $('aiKey').value.trim(), model: $('aiModel').value.trim(), ...(p.local ? { baseUrl: $('aiBaseUrl').value.trim() } : {}) });
+  });
+
+  // 사내 LLM 연결 확인: 입력한 주소 · 모델을 먼저 저장하고 서버에 물어본다
+  $('aiCheck').addEventListener('click', async () => {
+    const provider = document.querySelector('input[name=provider]:checked').value;
+    $('aiCheckState').textContent = '확인 중…';
+    const saved = await fetch('/api/settings', { method: 'POST', body: JSON.stringify({ provider, model: $('aiModel').value.trim(), baseUrl: $('aiBaseUrl').value.trim() }) }).then((r) => r.json());
+    if (saved.error) return ($('aiCheckState').textContent = saved.error);
+    applyLlm(saved.llm);
+    const r = await fetch('/api/llm/check', { method: 'POST', body: '{}' }).then((x) => x.json()).catch(() => null);
+    $('aiCheckState').textContent = r ? `${r.ok ? '✅' : '⚠️'} ${r.message || r.error}` : '확인하지 못했습니다.';
   });
 
   // ── 결과 저장 폴더 ────────────────────────────────────
@@ -839,8 +866,9 @@
     const useLogin = !$('loginUseRow').hidden && $('useLogin').checked;
     const clickAll = $('clickAll').checked;
     if (clickAll && !confirm('전체 동작 확인을 켰습니다. 저장·등록·제출·삭제 등이 실제로 실행되어 데이터가 바뀔 수 있습니다. 계속할까요?')) return;
-    // AI 테스트 + 저장된 로그인: 로그인된 화면 캡처가 AI 제공사로 전송되므로 한 번 동의를 받는다
-    if (mode === 'ai' && useLogin) {
+    // AI 테스트 + 저장된 로그인: 로그인된 화면 캡처가 외부 AI 제공사로 전송되므로 한 번 동의를 받는다 (사내 LLM 은 외부로 나가지 않음)
+    const localLlm = !!(llm && (llm.providers.find((p) => p.id === llm.provider) || {}).local);
+    if (mode === 'ai' && useLogin && !localLlm) {
       let agreed = false;
       try {
         agreed = localStorage.getItem('aiLoginConsent') === '1';

@@ -11,7 +11,7 @@ require('dotenv').config({ path: ENV_PATH, quiet: true });
 
 const { generateDocTestCases, mapDocToFeatures, toCsv } = require('./doc-testcases');
 const { importTcFile, looksLikeTcFile, ruleMapTcs } = require('./tc-import');
-const { PROVIDERS } = require('./llm');
+const { PROVIDERS, isReady, checkLocal } = require('./llm');
 const { analyzeSiteWithAi } = require('./site-ai');
 const { buildCasesHtml } = require('./cases-report');
 const { encryptionAvailable, sealFile, openSealed, tempPath, createSecretStore, maskSecrets } = require('./secure-store');
@@ -34,7 +34,8 @@ let APP_URL = 'http://127.0.0.1';
 // ─────────────────────────────────────────────────────────────
 
 // authMaxAgeDays: 저장된 로그인을 자동 삭제하기까지의 일수 (0 이면 자동 삭제 안 함)
-const DEFAULT_SETTINGS = { resultsDir: DEFAULT_RESULTS_DIR, llmProvider: 'gemini', llmModels: {}, authMaxAgeDays: 7 };
+// llmBaseUrls: 사내 LLM 처럼 주소로 연결하는 공급자의 서버 주소
+const DEFAULT_SETTINGS = { resultsDir: DEFAULT_RESULTS_DIR, llmProvider: 'gemini', llmModels: {}, llmBaseUrls: {}, authMaxAgeDays: 7 };
 
 function loadSettings() {
   try {
@@ -64,7 +65,9 @@ function saveSettings() {
 function currentLlm() {
   const provider = PROVIDERS[settings.llmProvider] ? settings.llmProvider : 'gemini';
   const info = PROVIDERS[provider];
-  return { provider, label: info.label, apiKey: process.env[info.envKey], model: settings.llmModels[provider] || info.defaultModel };
+  const apiKey = process.env[info.envKey];
+  const baseUrl = info.local ? (settings.llmBaseUrls || {})[provider] || info.defaultBaseUrl : undefined;
+  return { provider, label: info.label, local: !!info.local, apiKey, baseUrl, model: settings.llmModels[provider] || info.defaultModel, ready: isReady({ provider, apiKey, baseUrl }) };
 }
 
 function llmSettingsView() {
@@ -73,6 +76,7 @@ function llmSettingsView() {
     providers: Object.entries(PROVIDERS).map(([id, p]) => ({
       id, label: p.label, keyUrl: p.keyUrl, defaultModel: p.defaultModel,
       model: settings.llmModels[id] || '', hasKey: !!process.env[p.envKey],
+      local: !!p.local, baseUrl: p.local ? (settings.llmBaseUrls || {})[id] || '' : undefined, defaultBaseUrl: p.defaultBaseUrl,
     })),
   };
 }
@@ -666,7 +670,7 @@ async function runJob(config) {
         setPhase('기획서 TC와 화면 요소 매핑 중');
         try {
           // AI 키가 없으면(가져온 TC 파일만 해당) 화면 요소 이름 · 문구 기준 규칙 매칭
-          if (llm.apiKey) {
+          if (llm.ready) {
             mappings = await mapDocToFeatures(result.doc, analysis, llm, (done, total) => log(`[매핑] ${done}/${total}건`));
           } else {
             mappings = ruleMapTcs(result.doc, analysis);
@@ -874,7 +878,7 @@ const server = http.createServer(async (req, res) => {
         progress: state.progress,
         logs: state.logs.slice(-300),
         result: state.result,
-        hasApiKey: !!currentLlm().apiKey,
+        hasApiKey: currentLlm().ready,
         llm: llmSettingsView(),
         resultsDir: settings.resultsDir,
       });
@@ -912,14 +916,26 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && pathname === '/api/heartbeat') return json(res, 200, { ok: true });
 
     if (req.method === 'POST' && pathname === '/api/settings') {
-      // { provider, apiKey?, model? } - provider 를 선택 공급자로 지정하고 키/모델 저장
+      // { provider, apiKey?, model?, baseUrl? } - provider 를 선택 공급자로 지정하고 키/모델/서버 주소 저장
       const body = await readJson(req);
       const provider = PROVIDERS[body.provider] ? body.provider : currentLlm().provider;
+      if (typeof body.baseUrl === 'string' && PROVIDERS[provider].local) {
+        const v = body.baseUrl.trim().replace(/\/+$/, '');
+        if (v && !/^https?:\/\/\S+$/i.test(v)) return json(res, 400, { error: '서버 주소는 http:// 또는 https:// 로 시작해야 합니다. (예: http://127.0.0.1:11434/v1)' });
+        settings.llmBaseUrls = { ...(settings.llmBaseUrls || {}), [provider]: v };
+      }
       settings.llmProvider = provider;
       if (typeof body.apiKey === 'string' && body.apiKey.trim()) saveApiKey(PROVIDERS[provider].envKey, body.apiKey.trim());
       if (typeof body.model === 'string') settings.llmModels[provider] = body.model.trim();
       saveSettings();
-      return json(res, 200, { hasApiKey: !!currentLlm().apiKey, llm: llmSettingsView() });
+      return json(res, 200, { hasApiKey: currentLlm().ready, llm: llmSettingsView() });
+    }
+
+    // 사내 LLM 연결 확인: 서버가 응답하는지 · 고른 모델이 서버에 있는지
+    if (req.method === 'POST' && pathname === '/api/llm/check') {
+      const llm = currentLlm();
+      if (!llm.local) return json(res, 400, { error: '사내 LLM 을 선택한 경우에만 확인할 수 있습니다.' });
+      return json(res, 200, await checkLocal({ baseUrl: llm.baseUrl, apiKey: llm.apiKey, model: llm.model }));
     }
 
     // 승인된 기준선: 조회 · 승인 · 해제
@@ -998,8 +1014,8 @@ const server = http.createServer(async (req, res) => {
       const file = config.spec.file;
       if (mode === 'ai' && !url) return json(res, 400, { error: 'AI 테스트는 URL이 필요합니다.' });
       // 사용자 TC 파일(CSV)은 AI 없이도 규칙 매칭으로 실행할 수 있다
-      if ((mode === 'ai' || (file && !looksLikeTcFile(file))) && !currentLlm().apiKey) {
-        return json(res, 400, { error: `${currentLlm().label} API Key가 필요합니다. 상단 'AI 설정'에서 입력해주세요.` });
+      if ((mode === 'ai' || (file && !looksLikeTcFile(file))) && !currentLlm().ready) {
+        return json(res, 400, { error: currentLlm().local ? `${currentLlm().label} 서버 주소가 필요합니다. 상단 'AI 설정'에서 입력해주세요.` : `${currentLlm().label} API Key가 필요합니다. 상단 'AI 설정'에서 입력해주세요.` });
       }
       if (!url && !file) return json(res, 400, { error: 'URL 또는 기획서를 입력해주세요.' });
       const missing = secretRefsOf(config).filter((ref) => secrets.readSecret(ref) === null);
