@@ -72,7 +72,7 @@
 <div class="flow">
   <div class="row">
     <div class="step in"><div class="n">STEP 1</div><div class="t">입력</div><div class="d">[필수] URL 또는 기획서 · [권장] 로그인 · 기획서/내 TC 파일(CSV) · 범위 · 브라우저 · 화면 언어 · 다국어 · [선택] 동작 확인 범위 · 승인된 기준 · 시나리오 폴더 · 결과 폴더</div></div>
-    <div class="side"><b>로그인이 필요한 사이트</b><br>로그인 창에서 사람이 직접 로그인(ID/PW · SNS · 인증) → 로그인 상태를 암호화해 저장하고 이후 모든 단계에 사용<br><b>같은 사이트를 다시 입력</b>하면 지난 설정으로 자동 채움</div>
+    <div class="side"><b>로그인이 필요한 사이트</b><br>로그인 창에서 사람이 직접 로그인(ID/PW · SNS · 인증) → 로그인 상태를 암호화해 저장하고 이후 모든 단계에 사용<br><b>AI 설정</b> 외부 AI(Gemini · Claude · ChatGPT) 또는 <b>사내 LLM</b>(Gemma 등, 자료가 회사 밖으로 나가지 않음)<br><b>같은 사이트를 다시 입력</b>하면 지난 설정으로 자동 채움</div>
   </div>
   <div class="arrow-row"><div class="arrow">▼</div><div class="spacer"></div></div>
   <div class="row">
@@ -82,17 +82,17 @@
   <div class="arrow-row"><div class="arrow">▼</div><div class="spacer"></div></div>
   <div class="row">
     <div class="step core"><div class="n">STEP 3 · 하네스 generate-specs.js</div><div class="t">페이지마다 화면 분석</div><div class="d">버튼 · 링크 · 배너 · 입력창 · 검색창 · 드롭다운 · 표 · 문구 · 이미지 · 롤링 배너를 찾고, <b>실제로 눌러서</b> 무슨 일이 일어나는지 관찰</div></div>
-    <div class="side"><b>기획서를 넣은 경우</b> AI가 기획서로 TC를 쓰고, <b>내 TC 파일을 넣은 경우</b> 그 TC를 그대로 읽어서, STEP 3에서 찾은 화면 요소와 연결 (AI Key 가 없으면 이름 · 문구 · UI 용어 규칙으로 연결)</div>
+    <div class="side"><b>기획서를 넣은 경우</b> AI(외부 또는 사내 LLM)가 기획서로 TC를 쓰고, <b>내 TC 파일을 넣은 경우</b> 그 TC를 그대로 읽어서, STEP 3에서 찾은 화면 요소와 연결 (AI 가 없으면 이름 · 문구 · UI 용어 규칙으로 연결)<br><b>사내 LLM</b> 은 PDF 를 직접 못 받아 앱이 글자 + 페이지 그림으로 바꿔 보냄</div>
   </div>
   <div class="arrow-row"><div class="arrow">▼</div><div class="spacer"></div></div>
   <div class="row">
     <div class="step core"><div class="n">STEP 4</div><div class="t">테스트 케이스 생성</div><div class="d">화면 위→아래 순서로 요소마다 <b>노출 · 문구 · 동작</b> 확인 항목 + 페이지마다 로드 · 모바일 · 접근성 · 다국어 점검, 규칙 기반 오타 의심 검사 · <code>cases.html</code>(실행 전) 저장</div></div>
-    <div class="side"><b>시나리오 폴더에 JSON 이 있으면</b> 사용자 흐름 테스트도 만듦 (운영 서버 · 탈퇴 · 결제는 제외)<br><b>AI 테스트 버튼</b> 화면 캡처 + 요소 목록을 AI에게 보내 기대 동작 TC와 화면 이슈를 추가</div>
+    <div class="side"><b>시나리오 폴더에 JSON 이 있으면</b> 사용자 흐름 테스트도 만듦 (운영 서버 · 탈퇴 · 결제는 제외)<br><b>AI 테스트 버튼</b> 화면 캡처 + 요소 목록을 AI(외부 또는 사내 LLM)에게 보내 기대 동작 TC와 화면 이슈를 추가</div>
   </div>
   <div class="arrow-row"><div class="arrow">▼</div><div class="spacer"></div></div>
   <div class="row">
     <div class="step run"><div class="n">STEP 5 · Playwright</div><div class="t">실행 = 실제 사이트와 비교</div><div class="d">Chrome · Safari(WebKit) · Firefox에서 새 브라우저로 사이트를 다시 열고, 분석 때 관찰한 결과대로 동작하는지 하나씩 확인 (진행률 표시 · 중지 가능)</div></div>
-    <div class="side"><b>비교 기준</b><br>① 분석 때 실제로 관찰한 동작 (또는 사람이 승인한 기준)<br>② 기획서 · 내 TC 에 적힌 기대 결과<br>③ 시나리오에 사람이 쓴 기대 결과<br>④ AI가 판단한 기대 동작</div>
+    <div class="side"><b>비교 기준</b><br>① 분석 때 실제로 관찰한 동작 (또는 사람이 승인한 기준)<br>② 기획서 · 내 TC 에 적힌 기대 결과<br>③ 시나리오에 사람이 쓴 기대 결과<br>④ AI(외부 · 사내 LLM)가 판단한 기대 동작<br><b>AI 를 바꿔도 실행은 같은 Playwright</b></div>
   </div>
   <div class="arrow-row"><div class="arrow">▼</div><div class="spacer"></div></div>
   <div class="row">
