@@ -65,6 +65,8 @@ function normalizeRunConfig(body = {}) {
     scope: {
       mode: scopeMode,
       pages: strList(scope.pages),
+      // 같은 사이트의 다른 서브도메인(news. · blog. …)도 세부 페이지로 분석 (기본: 시작 주소와 같은 호스트만)
+      includeSubdomains: scope.includeSubdomains === true,
       exclude: { urlPatterns: strList(exclude.urlPatterns), buttonTexts: strList(exclude.buttonTexts) },
     },
     access: { basicAuth: ref(access.basicAuth), headers: ref(access.headers) },

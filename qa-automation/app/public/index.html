@@ -371,13 +371,14 @@
       <div class="scope">
         <label>
           <input type="radio" name="scope" value="all" checked>
-          <div><b>입력한 사이트에 연결된 세부 사이트 모두</b><span>같은 도메인으로 연결된 페이지를 모두 찾아 분석·테스트합니다.</span></div>
+          <div><b>입력한 사이트에 연결된 세부 사이트 모두</b><span>같은 주소(호스트)로 연결된 페이지를 찾아 분석·테스트합니다. 최대 50페이지 · 분석은 20분까지 (넘으면 남은 페이지는 결과에 알림)</span></div>
         </label>
         <label>
           <input type="radio" name="scope" value="single">
-          <div><b>입력한(첨부한) 사이트(PDF)만</b><span>입력한 URL 한 페이지 또는 첨부한 기획서 범위만 테스트합니다.</span></div>
+          <div><b>입력한(첨부한) 사이트(PDF)만</b><span>입력한 URL 한 페이지 또는 첨부한 기획서 범위만 테스트합니다. 포털처럼 큰 사이트는 이쪽을 권장합니다.</span></div>
         </label>
       </div>
+      <label class="login-use" id="subdomainRow"><input type="checkbox" id="includeSubdomains"> 다른 서브도메인도 포함 <span class="hint">· 예: www.naver.com 에서 news.naver.com · blog.naver.com 까지. 포털은 뉴스 · 블로그 글까지 끝없이 늘어나 매우 오래 걸립니다</span></label>
     </div>
 
     <div class="field">
@@ -523,6 +524,8 @@
     $('runAi').disabled = running || noBrowser || !url;
 
     const scope = document.querySelector('input[name=scope]:checked').value;
+    // 서브도메인 포함은 '세부 사이트 모두'일 때만 의미가 있다
+    $('subdomainRow').hidden = scope !== 'all';
     let hint = 'URL을 입력하거나 기획서를 첨부해주세요.';
     if (noBrowser) hint = '테스트 브라우저를 하나 이상 선택해주세요.';
     else if (url && selectedFile && scope === 'single') hint = '기획서 TC를 실제 화면에 매핑해 기획서 기준 테스트만 실행합니다.';
@@ -749,7 +752,7 @@
     await fetch('/api/baseline/clear', { method: 'POST', body: JSON.stringify({ url: validUrl(), scope: document.querySelector('input[name=scope]:checked').value }) });
     refreshBaseline();
   });
-  document.querySelectorAll('input[name=scope]').forEach((r) => r.addEventListener('change', refreshBaseline));
+  document.querySelectorAll('input[name=scope]').forEach((r) => r.addEventListener('change', () => { refreshBaseline(); refreshForm(); }));
 
   // 시나리오: 입력한 사이트의 시나리오 폴더에 있는 JSON 개수 · 형식 오류 · 운영 서버 여부
   async function refreshScenarios() {
@@ -792,6 +795,7 @@
       $('projectState').hidden = true;
       return;
     }
+    $('includeSubdomains').checked = !!cfg.scope.includeSubdomains;
     const scopeEl = document.querySelector(`input[name=scope][value=${cfg.scope.mode === 'single' ? 'single' : 'all'}]`);
     if (scopeEl) scopeEl.checked = true;
     document.querySelectorAll('input[name=browser]').forEach((el) => (el.checked = cfg.runtime.browsers.includes(el.value)));
@@ -889,7 +893,7 @@
         locale: $('locale').value || null,
         xltLocales: [...document.querySelectorAll('input[name=xlt]:checked')].map((el) => el.value),
       },
-      scope: { mode: scope },
+      scope: { mode: scope, includeSubdomains: scope === 'all' && $('includeSubdomains').checked },
       spec: { file },
       safety: { clickAll },
       mode, useLogin, baselineRun,

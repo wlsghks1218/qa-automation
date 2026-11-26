@@ -613,6 +613,7 @@ async function runJob(config) {
           // 화면 언어: 언어마다 다른 화면이 나오는 서비스가 있으므로 고를 수 있게 (비우면 이 PC 언어)
           ...(config.runtime.locale ? { LOCALE: config.runtime.locale, TIMEZONE: LOCALE_TZ[config.runtime.locale] } : {}),
           ...(config.runtime.xltLocales.length ? { XLT_LOCALES: config.runtime.xltLocales.join(',') } : {}),
+          ...(config.scope.includeSubdomains ? { QA_INCLUDE_SUBDOMAINS: '1' } : {}),
         });
         checkStop();
         if (genCode !== 0) throw new Error('사이트 분석에 실패했습니다. 로그를 확인해주세요.');
@@ -1016,6 +1017,20 @@ const server = http.createServer(async (req, res) => {
       // 사용자 TC 파일(CSV)은 AI 없이도 규칙 매칭으로 실행할 수 있다
       if ((mode === 'ai' || (file && !looksLikeTcFile(file))) && !currentLlm().ready) {
         return json(res, 400, { error: currentLlm().local ? `${currentLlm().label} 서버 주소가 필요합니다. 상단 'AI 설정'에서 입력해주세요.` : `${currentLlm().label} API Key가 필요합니다. 상단 'AI 설정'에서 입력해주세요.` });
+      }
+      // 사내 LLM 이 필요한 실행이면 시작 전에 연결부터 확인 (분석을 다 하고 나서 실패하지 않도록)
+      if ((mode === 'ai' || (file && !looksLikeTcFile(file))) && currentLlm().local) {
+        const llm = currentLlm();
+        const check = await checkLocal({ baseUrl: llm.baseUrl, apiKey: llm.apiKey, model: llm.model });
+        if (!check.ok) {
+          const thisPc = /\/\/(127\.0\.0\.1|localhost)(:|\/)/i.test(llm.baseUrl);
+          const how = !check.models.length
+            ? thisPc
+              ? `이 PC 에서 사내 LLM 서버(Ollama 등)가 실행되고 있지 않습니다 (${llm.baseUrl}). 이 PC 에 설치해 실행하거나, AI 설정에서 회사 서버 주소를 넣거나, 외부 AI(Gemini · Claude · ChatGPT)로 바꿔주세요. 설치 방법: docs/internal-llm.md`
+              : `사내 LLM 서버(${llm.baseUrl})에 연결할 수 없습니다. 주소 · 방화벽 · 서버가 켜져 있는지 확인하거나, AI 설정에서 외부 AI 로 바꿔주세요.`
+            : `${check.message}. 서버에서 모델을 받거나(ollama pull ${llm.model}) AI 설정의 모델 이름을 서버에 있는 것으로 바꿔주세요.`;
+          return json(res, 400, { error: how });
+        }
       }
       if (!url && !file) return json(res, 400, { error: 'URL 또는 기획서를 입력해주세요.' });
       const missing = secretRefsOf(config).filter((ref) => secrets.readSecret(ref) === null);

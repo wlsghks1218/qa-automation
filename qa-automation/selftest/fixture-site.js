@@ -25,7 +25,7 @@ dialog{border:1px solid #333}</style>`;
 const skip = (page) => `<a class="skip" href="#${page === 'home' ? M('nowhere', 'content') : 'content'}">본문 바로가기</a>
 <style>.skip{position:absolute;top:-40px;left:0;opacity:0}.skip:focus{top:0;opacity:1}</style>`;
 
-const shell = (title, page, body, extra = '') => `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>${title}</title>${extra}</head><body>${skip(page)}${header(page)}<main id="content">${body}</main></body></html>`;
+const shell = (title, page, body, extra = '') => `<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title>${extra}</head><body>${skip(page)}${header(page)}<main id="content">${body}</main></body></html>`;
 
 const people = Array.from({ length: 12 }, (_, i) => [`구성원${'가나다라마바사아자차카타'[i]}`, ['개발팀', '기획팀', '디자인팀'][i % 3], `2025-0${(i % 9) + 1}-1${i % 9}`]);
 
@@ -36,6 +36,8 @@ function home() {
     `<h1>자가 검증 홈</h1>
 <img alt="배너 이미지" width="200" height="40" src="${M('/missing.png', "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='40'%3E%3Crect width='200' height='40' fill='%2399c'/%3E%3C/svg%3E")}">
 <p>서비스를 소개하는 문구입니다</p>
+<a href="/terms">이용약관</a>
+${partners()}
 <p>결제가능 ${M('{{token}}', 'USDT')}</p>
 <button type="button" ${M('', 'disabled')}>다음 단계</button>
 <a href="/" class="lg" id="lgA">로고 링크</a><a href="/" class="lg" id="lgB" style="display:none">로고 링크</a>
@@ -93,6 +95,26 @@ render();
 </script>`
   ).replace(M('<button type="button" id="dl">엑셀 다운로드</button>', '__none__'), '');
 }
+
+// 문서형 페이지(약관): 긴 본문 + 목차 링크 30개 → 생성기가 링크를 고르게 10개만 확인하는지 (오탐 방지 확인용)
+function terms() {
+  const sections = Array.from({ length: 30 }, (_, i) => i + 1);
+  const toc = sections.map((n) => `<li><a href="#s${n}">제${n}조</a></li>`).join('');
+  const body = sections.map((n) => `<h2 id="s${n}">제${n}조 (조항 ${n})</h2><p>${'이 약관은 서비스 이용에 관한 회사와 회원의 권리와 의무를 정합니다. '.repeat(4)}</p>`).join('');
+  // 합쳐진 칸(rowspan · colspan)이 있는 표 — 칸 수 확인이 오탐하지 않는지 지킨다
+  const keep = `<table><thead><tr><th>관련 법령</th><th>보유 정보</th><th>보관 기간</th></tr></thead><tbody>
+<tr><td rowspan="2">전자상거래법</td><td>계약 기록</td><td>5년</td></tr>
+<tr><td>소비자 불만 기록</td><td>3년</td></tr>
+<tr><td>통신비밀보호법</td><td colspan="2">접속 기록 3개월</td></tr></tbody></table>`;
+  return shell('이용약관', 'terms', `<h1>이용약관</h1><ol class="toc">${toc}</ol>${keep}${body}`);
+}
+
+// 다른 곳으로 가는 새 탭 링크 묶음(제휴사 로고 등): 실제 사이트처럼 이름 · 목적지가 모두 다르다. 버그 모드: 4번째("동해무역")가 사라짐 (D25)
+const PARTNERS = [['한빛상사', 'hanbit'], ['대한물산', 'daehan'], ['서울산업', 'seoul-ind'], ['동해무역', 'donghae'], ['남산제약', 'namsan'], ['푸른식품', 'pureun']];
+const partners = () =>
+  `<ul class="partners">${PARTNERS.filter(([name]) => !(mutated && name === '동해무역'))
+    .map(([name, path]) => `<li><a href="http://127.0.0.1:5591/${path}" target="_blank">${name}</a></li>`)
+    .join('')}</ul>`;
 
 function about() {
   return shell('회사 소개', 'about', `<h1>회사 소개</h1><h2>${M('서비스 소게', '서비스 소개')}</h2><p id="team">우리 팀 이야기</p><p id="history">걸어온 길</p>`);
@@ -197,6 +219,7 @@ http
     if (u === '/') return send(200, home());
     if (u === '/list') return send(200, list());
     if (u === '/about') return send(200, about());
+    if (u === '/terms') return send(200, terms());
     if (u === '/support') return send(200, form());
     if (/^\/item\/\d+$/.test(u)) {
       // 이름 없는 뒤로가기 아이콘 버튼 (앱 화면에 흔한 형태)

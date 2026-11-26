@@ -1,4 +1,4 @@
-import { Page, expect, test } from '@playwright/test';
+import { Page, Browser, BrowserContextOptions, expect, test } from '@playwright/test';
 
 // 팝업/쿠키 배너 처리 패턴 (scripts/generate-specs.js 의 분석 로직과 동일하게 유지)
 const POPUP_DISMISS = /(오늘\s*하루|\d+\s*일\s*동안|다시)\s*(보지|열지)\s*않기|don'?t\s+show\s+(again|today)/i;
@@ -60,7 +60,10 @@ function loadSavedSession(): SavedSession {
   return savedSession!;
 }
 
-export async function openPage(page: Page, url: string) {
+/** popupWait: 분석 때 '다시 보지 않기' 팝업이 있던 페이지만 true (없던 페이지는 3초 기다리지 않는다 — 뒤늦게 떠도 자동으로 닫힘) */
+export type OpenOptions = { popupWait?: boolean };
+
+export async function openPage(page: Page, url: string, opts: OpenOptions = {}) {
   // sessionStorage 에 로그인을 두는 사이트(Web3Auth 등): 페이지 스크립트보다 먼저 같은 사이트에만 채운다 (generate-specs.js 의 restoreSessionStorage 와 동일)
   const session = loadSavedSession();
   if (session.length) {
@@ -107,12 +110,63 @@ export async function openPage(page: Page, url: string) {
 
   const response = await page.goto(url, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(1500);
-  const first = page.getByRole('button', { name: POPUP_DISMISS }).first();
-  await first.waitFor({ state: 'visible', timeout: 3000 }).catch(() => {});
+  if (opts.popupWait !== false) {
+    const first = page.getByRole('button', { name: POPUP_DISMISS }).first();
+    await first.waitFor({ state: 'visible', timeout: 3000 }).catch(() => {});
+  }
   await dismissPopups(page);
 
   return { response, errors, network, consoleErrors, mixed };
 }
+
+/**
+ * 한 화면을 한 번 열고 그 화면의 케이스들을 차례로 확인한다 (케이스마다 새 브라우저를 열지 않음).
+ * begin(changes): 케이스 시작. 앞 케이스가 화면을 바꿨으면(클릭 · 입력 등) 처음 상태(쿠키 · 저장소 · 주소)로 되돌린 뒤 시작.
+ *   changes = 이 케이스가 화면을 바꿀 수 있는지 → 다음 케이스 전에 되돌린다.
+ *   errors 는 이번 케이스 동안 생긴 JS 오류만 담는다.
+ * 노출 · 문구 · 이미지 확인처럼 화면을 바꾸지 않는 케이스는 다시 열지 않고 이어서 확인하므로 빠르다.
+ */
+export async function openScreen(browser: Browser, url: string, open: OpenOptions, contextOptions: BrowserContextOptions) {
+  const statePath = process.env.QA_STORAGE_STATE;
+  const context = await browser.newContext({ ...contextOptions, ...(statePath && require('fs').existsSync(statePath) ? { storageState: statePath } : {}) });
+  const page = await context.newPage();
+  const opened = await openPage(page, url, open);
+  const cookies = await context.cookies();
+  const storage = await page.evaluate(() => ({ l: { ...localStorage }, s: { ...sessionStorage } })).catch(() => ({ l: {}, s: {} }));
+  const origin = new URL(url).origin;
+  let dirty = false;
+  const restore = async () => {
+    await context.clearCookies().catch(() => {});
+    if (cookies.length) await context.addCookies(cookies).catch(() => {});
+    if (new URL(page.url()).origin !== origin) await page.goto(url, { waitUntil: 'domcontentloaded' }).catch(() => {});
+    await page
+      .evaluate((snap) => {
+        localStorage.clear();
+        for (const [k, v] of Object.entries(snap.l)) localStorage.setItem(k, v as string);
+        sessionStorage.clear();
+        for (const [k, v] of Object.entries(snap.s)) sessionStorage.setItem(k, v as string);
+      }, storage)
+      .catch(() => {});
+    await page.goto(url, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(800);
+    await dismissPopups(page);
+  };
+  return {
+    page,
+    async begin(changes: boolean) {
+      if (dirty) await restore();
+      dirty = changes;
+      opened.errors.length = 0;
+      return { page, errors: opened.errors };
+    },
+    /** 케이스가 실패하면 화면 상태를 알 수 없으므로 다음 케이스 전에 되돌린다 */
+    markDirty() {
+      dirty = true;
+    },
+    close: () => context.close(),
+  };
+}
+export type Screen = Awaited<ReturnType<typeof openScreen>>;
 
 /** 깨진 이미지 주소 목록 (끝까지 스크롤해서 레이지 로딩 이미지까지) */
 export async function brokenImages(page: Page): Promise<string[]> {
@@ -156,7 +210,10 @@ export async function mobileOverflow(page: Page) {
       wide.push(`${el.tagName.toLowerCase()}${cls} (${Math.round(r.right - window.innerWidth)}px 넘침) "${((el as HTMLElement).innerText || '').trim().slice(0, 20)}"`);
       if (wide.length >= 5) break;
     }
-    return { overflow, wide };
+    // 모바일용 viewport meta 가 없으면 PC 전용 페이지로 본다 (넘침은 실패가 아니라 경고)
+    const vp = document.querySelector('meta[name="viewport" i]')?.getAttribute('content') || '';
+    const responsive = /width\s*=\s*device-width/i.test(vp);
+    return { overflow, wide, responsive };
   });
 }
 
@@ -367,11 +424,39 @@ export function pickTerm(row: string | undefined): string | null {
 export async function tableData(table: import('@playwright/test').Locator): Promise<{ heads: string[]; rows: string[][] }> {
   return table.evaluate((t) => {
     const clean = (s: string) => (s || '').trim().replace(/\s+/g, ' ');
+    // 합쳐진 칸(rowspan · colspan)을 실제 칸 위치로 펼친다 (generate-specs.js 의 tableLayoutInPage 와 같은 기준)
+    const grid = (trs: Element[]) => {
+      const out: string[][] = [];
+      const carry: ({ text: string; left: number } | undefined)[] = [];
+      for (const tr of trs) {
+        const row: string[] = [];
+        let col = 0;
+        const fill = () => {
+          while (carry[col] && carry[col]!.left > 0) {
+            row[col] = carry[col]!.text;
+            carry[col]!.left--;
+            col++;
+          }
+        };
+        for (const c of Array.from(tr.children)) {
+          fill();
+          const span = Math.max(1, Number(c.getAttribute('colspan')) || 1);
+          const rs = Math.max(1, Number(c.getAttribute('rowspan')) || 1);
+          const text = clean((c as HTMLElement).innerText);
+          for (let k = 0; k < span; k++) {
+            row[col] = text;
+            carry[col] = rs > 1 ? { text, left: rs - 1 } : undefined;
+            col++;
+          }
+        }
+        fill();
+        out.push(row);
+      }
+      return out;
+    };
     const headRow = t.querySelector('thead tr') || t.querySelector('tr');
-    const heads = headRow ? Array.from(headRow.children).map((h) => clean((h as HTMLElement).innerText)) : [];
-    const rows = Array.from(t.querySelectorAll('tbody tr'))
-      .filter((r) => r !== headRow)
-      .map((r) => Array.from(r.children).map((c) => clean((c as HTMLElement).innerText)));
+    const heads = headRow ? grid([headRow])[0] : [];
+    const rows = grid(Array.from(t.querySelectorAll('tbody tr')).filter((r) => r !== headRow));
     return { heads, rows };
   });
 }

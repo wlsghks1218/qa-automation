@@ -29,4 +29,5 @@ module.exports = [
   { id: 'D22', area: '시나리오: 목록 순서', desc: '새로 등록한 글이 목록 맨 위가 아니라 맨 아래에 붙음', group: SCENARIO, title: 'S01 ', check: /^5-4\. 확인: .*에 "\{\{title\}\}"/ },
   { id: 'D23', area: '시나리오: 저장 내용', desc: '등록한 글의 본문이 저장되지 않아 상세 화면에 보이지 않음', group: SCENARIO, title: 'S01 ', check: /^6-1\. 확인: "\{\{body\}\}"/ },
   { id: 'D24', area: '시나리오: 삭제', desc: '삭제 완료 안내는 나오지만 글이 목록에 그대로 남음', group: SCENARIO, title: 'S02 ', check: /^5-2\. 확인: .*가 보이지 않음/ },
+  { id: 'D25', area: '새 탭 링크 묶음', desc: '제휴사 새 탭 링크 6개 중 4번째("동해무역")가 사라짐 (묶음 케이스의 "모두 노출" 확인)', page: '/', title: '새 탭 링크 묶음', check: /^노출: "동해무역"/ },
 ];
